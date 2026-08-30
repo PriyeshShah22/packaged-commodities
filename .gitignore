@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# Python backend
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+*.db
+backend/output/
+
 # Environment variables
 .env
 .env.*

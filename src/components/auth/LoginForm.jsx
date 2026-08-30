@@ -5,7 +5,7 @@ import AuthInput from './AuthInput';
 import PasswordInput from './PasswordInput';
 import AuthButton from './AuthButton';
 import ForgotPasswordModal from './ForgotPasswordModal';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context/auth-context';
 
 /**
  * LoginForm

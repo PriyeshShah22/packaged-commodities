@@ -1,0 +1,28 @@
+[project]
+name = "packmetrix-backend"
+version = "0.1.0"
+description = "Evidence-first Legal Metrology inspection API for PackMetrix"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "sqlalchemy>=2.0,<3",
+  "pydantic-settings>=2.10,<3",
+  "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
+  "rapidocr>=3.8,<4",
+  "onnxruntime>=1.23,<2",
+  "reportlab>=4.4,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "jsonschema>=4.25,<5",
+  "pytest>=8.4,<9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

@@ -3,9 +3,8 @@ import { useNavigate, Link } from 'react-router-dom';
 import { User, Mail, Building2, AlertCircle } from 'lucide-react';
 import AuthInput from './AuthInput';
 import PasswordInput from './PasswordInput';
-import RoleSelect from './RoleSelect';
 import AuthButton from './AuthButton';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context/auth-context';
 
 /**
  * SignupForm
@@ -24,7 +23,6 @@ export default function SignupForm() {
     name: '',
     email: '',
     organization: '',
-    role: '',
     password: '',
     confirmPassword: '',
   });
@@ -48,9 +46,6 @@ export default function SignupForm() {
         break;
       case 'organization':
         if (!value.trim()) error = 'Organization name is required.';
-        break;
-      case 'role':
-        if (!value) error = 'Please select a designated role.';
         break;
       case 'password':
         if (!value) {
@@ -119,8 +114,7 @@ export default function SignupForm() {
         name: formData.name,
         email: formData.email,
         organization: formData.organization,
-        role: formData.role,
-        _password: formData.password,
+        password: formData.password,
       });
 
       navigate('/dashboard');
@@ -207,17 +201,9 @@ export default function SignupForm() {
           disabled={isLoading}
         />
 
-        {/* Designated Role */}
-        <RoleSelect
-          id="signup-role"
-          name="role"
-          value={formData.role}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          error={errors.role}
-          required
-          disabled={isLoading}
-        />
+        <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-5 text-sky-900">
+          New accounts start with read-only report access. An administrator must grant inspector or administrator permissions.
+        </div>
 
         {/* Password with Strength Indicator */}
         <PasswordInput

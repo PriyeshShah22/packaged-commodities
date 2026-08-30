@@ -1,106 +1,46 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import { loginAccount, signupAccount, verifySession } from '../lib/api';
+import { AuthContext } from './auth-context';
 
-const AuthContext = createContext(null);
+const SESSION_KEY = 'packmetrix_session';
 
-export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem('packmetrix_mock_user');
-      return saved ? JSON.parse(saved) : null;
-    } catch {
-      return null;
-    }
-  });
-
-  const [simulatedNetworkError, setSimulatedNetworkError] = useState(false);
-
-  useEffect(() => {
-    if (user) {
-      sessionStorage.setItem('packmetrix_mock_user', JSON.stringify(user));
-    } else {
-      sessionStorage.removeItem('packmetrix_mock_user');
-    }
-  }, [user]);
-
-  /**
-   * Mock login function with realistic response delay and validation
-   */
-  const login = async ({ email, password, _remember = false }) => {
-    // Artificial realistic inspection network latency
-    await new Promise((resolve) => setTimeout(resolve, 750));
-
-    if (simulatedNetworkError) {
-      throw new Error('Something went wrong. Try again.');
-    }
-
-    // Validate demo error triggers
-    if (password === 'wrongpassword' || password === 'error') {
-      throw new Error('Incorrect email or password.');
-    }
-
-    // Default successful login
-    const mockUser = {
-      email,
-      name: email.split('@')[0].replace('.', ' ').replace(/(^\w|\s\w)/g, m => m.toUpperCase()),
-      organization: email.includes('.gov.in') ? 'Department of Consumer Affairs (Legal Metrology Division)' : 'Compliance Audit Directorate',
-      role: 'Legal Metrology Inspector',
-      token: 'mock-jwt-lm-' + Math.random().toString(36).substring(2),
-      signedInAt: new Date().toISOString(),
-    };
-
-    setUser(mockUser);
-    return mockUser;
-  };
-
-  /**
-   * Mock signup function
-   */
-  const signup = async ({ name, email, organization, role, _password }) => {
-    await new Promise((resolve) => setTimeout(resolve, 850));
-
-
-    if (simulatedNetworkError) {
-      throw new Error('Something went wrong. Try again.');
-    }
-
-    const mockUser = {
-      name,
-      email,
-      organization,
-      role: role || 'Enforcement Officer',
-      token: 'mock-jwt-lm-' + Math.random().toString(36).substring(2),
-      signedInAt: new Date().toISOString(),
-    };
-
-    setUser(mockUser);
-    return mockUser;
-  };
-
-  const logout = () => {
-    setUser(null);
-  };
-
-  return (
-    <AuthContext.Provider
-      value={{
-        user,
-        isAuthenticated: Boolean(user),
-        login,
-        signup,
-        logout,
-        simulatedNetworkError,
-        setSimulatedNetworkError,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
-  );
+function readSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; }
 }
 
-export function useAuth() {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
+export function AuthProvider({ children }) {
+  const [session, setSession] = useState(readSession);
+  const [checkingSession, setCheckingSession] = useState(Boolean(session?.token));
+
+  useEffect(() => {
+    if (!session?.token) return;
+    verifySession(session.token)
+      .then((user) => setSession((current) => ({ ...current, user })))
+      .catch(() => setSession(null))
+      .finally(() => setCheckingSession(false));
+  }, [session?.token]);
+
+  useEffect(() => {
+    if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    else localStorage.removeItem(SESSION_KEY);
+  }, [session]);
+
+  const login = async ({ email, password }) => {
+    const response = await loginAccount(email, password);
+    const next = { token: response.access_token, user: response.user };
+    setSession(next);
+    return response.user;
+  };
+
+  const signup = async ({ name, email, organization, password, _password }) => {
+    const response = await signupAccount({ name, email, organization, password: password || _password });
+    const next = { token: response.access_token, user: response.user };
+    setSession(next);
+    return response.user;
+  };
+
+  const logout = () => setSession(null);
+  const hasRole = (...roles) => Boolean(session?.user?.roles?.some((role) => roles.includes(role)));
+
+  return <AuthContext.Provider value={{ user: session?.user || null, token: session?.token || null, isAuthenticated: Boolean(session?.token && session?.user), checkingSession, login, signup, logout, hasRole }}>{children}</AuthContext.Provider>;
 }
