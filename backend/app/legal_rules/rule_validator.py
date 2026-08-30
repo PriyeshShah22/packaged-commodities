@@ -13,6 +13,36 @@ FORMAT_PATTERNS = {
     "unit_sale_price": re.compile(r"(?:₹|Rs\.?|INR)\s*\d+(?:[.,]\d{1,2})?\s*(?:per|/)\s*(?:g|kg|cm|m|metre|meter|ml|l|litre|liter|number|unit)\b", re.I),
 }
 
+FIELD_LABELS = {
+    "responsible_party_name": "manufacturer, packer, or importer name",
+    "responsible_party_address": "responsible-party address",
+    "commodity_name": "common or generic commodity name",
+    "net_quantity": "net quantity",
+    "mrp": "maximum retail price",
+    "consumer_care": "consumer-care contact",
+    "country_of_origin": "country of origin",
+    "manufacture_pack_import_date": "manufacture, packing, or import date",
+    "best_before_or_use_by": "best-before or use-by date",
+    "unit_sale_price": "unit sale price",
+}
+
+
+def _labels(fields: list[str]) -> str:
+    return ", ".join(FIELD_LABELS.get(field, field.replace("_", " ")) for field in fields)
+
+
+def _review_reason(rule: dict[str, Any], reasons: tuple[str, ...] | list[str]) -> str:
+    fields = _labels(rule.get("required_evidence", []))
+    conditions = rule.get("applicability", {}).get("required_conditions", [])
+    origins = rule.get("applicability", {}).get("origins", [])
+    if origins:
+        return f"Confirm whether the product is imported before the {fields} requirement is applied."
+    if conditions:
+        condition = conditions[0].replace("_", " ")
+        return f"Confirm that {condition} for this product; the detected {fields} is retained as evidence."
+    detail = next((reason for reason in reasons if reason), "inspection context is incomplete")
+    return f"Confirm the product context for {fields}: {detail}."
+
 
 def _all_images_sufficient(request: ValidationRequest) -> bool:
     return bool(request.image_quality) and all(item.status == QualityState.SUFFICIENT for item in request.image_quality)
@@ -33,7 +63,7 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
     if applicability.state == ApplicabilityState.NOT_APPLICABLE:
         return {**base, "outcome": "NOT_APPLICABLE", "reason": "Rule does not apply to this inspection context."}
     if applicability.state == ApplicabilityState.UNCERTAIN:
-        return {**base, "outcome": "REVIEW", "reason": "Applicability is uncertain; an inspector or additional product context is required."}
+        return {**base, "outcome": "REVIEW", "reason": _review_reason(rule, applicability.reasons)}
 
     by_field: dict[str, list[Any]] = defaultdict(list)
     for item in request.evidence:
@@ -65,10 +95,10 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
     base["evidence"] = [item.model_dump() for item in selected]
 
     if conflicts:
-        return {**base, "outcome": "REVIEW", "reason": f"Conflicting evidence was detected for: {', '.join(conflicts)}."}
+        return {**base, "outcome": "REVIEW", "reason": f"Different values were detected for {_labels(conflicts)}; compare them with the package evidence."}
 
     if low_confidence:
-        return {**base, "outcome": "REVIEW", "reason": f"OCR/extraction confidence is below threshold for: {', '.join(low_confidence)}."}
+        return {**base, "outcome": "REVIEW", "reason": f"The detected {_labels(low_confidence)} is uncertain; verify it against the highlighted package evidence."}
 
     if missing:
         complete_for_missing = all(request.field_coverage.get(field) == CoverageState.COMPLETE for field in missing)
@@ -76,12 +106,12 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
             return {
                 **base,
                 "outcome": "FAIL",
-                "reason": f"No declaration was found for {', '.join(missing)} after sufficient image quality and field-specific complete coverage were established.",
+                "reason": f"No {_labels(missing)} declaration was found after all relevant package surfaces and image quality were confirmed.",
             }
         return {
             **base,
             "outcome": "REVIEW",
-            "reason": f"Evidence was not reliably detected for {', '.join(missing)}, but absence is not established from the supplied images.",
+            "reason": f"The {_labels(missing)} was not reliably detected; absence is not established. More package surfaces or clearer evidence are needed.",
         }
 
     validation_format = rule.get("validation_config", {}).get("format")
@@ -89,9 +119,10 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
         pattern = FORMAT_PATTERNS[validation_format]
         invalid = [item.field for item in selected if not pattern.search(item.value)]
         if invalid:
-            return {**base, "outcome": "FAIL", "reason": f"Detected declaration has an invalid or incomplete format for: {', '.join(invalid)}."}
+            return {**base, "outcome": "FAIL", "reason": f"The detected {_labels(invalid)} declaration has an invalid or incomplete format."}
 
-    return {**base, "outcome": "PASS", "reason": "Required evidence was detected with sufficient confidence and passed deterministic validation."}
+    detected = "; ".join(f"{FIELD_LABELS.get(item.field, item.field)}: {item.value}" for item in selected)
+    return {**base, "outcome": "PASS", "reason": f"Detected and validated: {detected}."}
 
 
 def validate_rules(rules: list[dict[str, Any]], request: ValidationRequest) -> list[dict[str, Any]]:

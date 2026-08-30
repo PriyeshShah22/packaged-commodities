@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from collections.abc import Iterable
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ ANCHORS = {
 }
 
 EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+URL = re.compile(r"(?:\bhttps?://|\bwww\.|\b[a-z0-9][a-z0-9-]*\.(?:com|in|org|net|co\.in)\b)", re.I)
 PHONE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9](?:[\s-]?\d){9}(?!\d)")
 QUANTITY = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|gms?|gm|grams?|kgs?|kg|ml|mL|litres?|liters?|ltr|l|cm|metres?|meters?|m|nos?\.?|units?|pieces?|pairs?)\b", re.I)
 PRICE = re.compile(r"(?:₹|rs\.?|inr)?\s*(\d+(?:[.,]\d{1,2})?)", re.I)
@@ -29,6 +31,7 @@ COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|i
 ADDRESS_HINT = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|india|pincode|pin|gujarat|maharashtra|delhi|mumbai|kolkata|chennai|bengaluru|bangalore|plot|sector|chamber|village|taluka)\b", re.I)
 NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?)\b", re.I)
 GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website)\b", re.I)
+PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin)\b", re.I)
 
 
 def _center(line: dict[str, Any]) -> tuple[float, float]:
@@ -60,6 +63,30 @@ def _dedupe_rank(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if key and (key not in unique or item["confidence"] > unique[key]["confidence"]):
             unique[key] = item
     return sorted(unique.values(), key=lambda item: (item["confidence"], -len(item["value"])), reverse=True)
+
+
+def _valid_product_text(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", text).strip(" .,:;|-")
+    digits = re.sub(r"\D", "", compact)
+    return bool(
+        3 <= len(compact) <= 70
+        and len(re.findall(r"[A-Za-z]", unicodedata.normalize("NFKD", compact))) >= 4
+        and not URL.search(compact)
+        and not EMAIL.search(compact)
+        and not PHONE.search(compact)
+        and not FSSAI.fullmatch(digits)
+        and not BARCODE.fullmatch(digits)
+        and not COMPANY.search(compact)
+        and not ADDRESS_HINT.search(compact)
+        and not GENERIC_LABEL.search(compact)
+        and not PRODUCT_REJECT.search(compact)
+        and not NUTRITION.search(compact)
+    )
+
+
+def _clean_product_text(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", folded).strip(" .,:;|-")
 
 
 def _normalize_quantity(value: str) -> str:
@@ -192,11 +219,25 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             text = item["text"].strip()
             box = item.get("bbox") or [0, 0, 0, 0]
             height = box[3] - box[1]
-            if 4 <= len(text) <= 80 and len(re.findall(r"[A-Za-z]", text)) >= 4 and not GENERIC_LABEL.search(text) and not NUTRITION.search(text) and not EMAIL.search(text) and not COMPANY.search(text) and not ADDRESS_HINT.search(text):
-                display.append((height * item["confidence"], item))
+            width = box[2] - box[0]
+            if _valid_product_text(text):
+                # Display names tend to be large, wide text on a front panel.
+                # Confidence breaks ties, but cannot make a URL or identifier a name.
+                display.append((height * 2.2 + min(width, 900) * .03 + item["confidence"] * 20, item))
         if display:
             _, best = max(display, key=lambda pair: pair[0])
-            candidates["product_name"].append(_candidate("product_name", best["text"].title(), [best], .08))
+            _, best_y = _center(best)
+            best_height = max(16, (best.get("bbox") or [0, 0, 0, 0])[3] - (best.get("bbox") or [0, 0, 0, 0])[1])
+            best_key = re.sub(r"[^a-z0-9]", "", _clean_product_text(best["text"]).lower())
+            companion = next((item for _, item in sorted(display, key=lambda pair: pair[0], reverse=True)
+                              if item is not best and abs(_center(item)[1] - best_y) <= best_height * 2.8
+                              and (candidate_key := re.sub(r"[^a-z0-9]", "", _clean_product_text(item["text"]).lower()))
+                              and candidate_key not in best_key and best_key not in candidate_key
+                              and not re.search(r"\b(?:ingredients?|nutrition|servings?)\b", item["text"], re.I)), None)
+            parts = [best] + ([companion] if companion else [])
+            parts.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
+            value = " ".join(_clean_product_text(item["text"]) for item in parts)
+            candidates["product_name"].append(_candidate("product_name", value.title(), parts, .05))
 
     fields: dict[str, dict[str, Any]] = {}
     for field, items in candidates.items():

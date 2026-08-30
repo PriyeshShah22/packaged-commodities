@@ -1,7 +1,7 @@
 const KEY = 'packmetrix_reports_v2';
 
 export function getReports() {
-  try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem(KEY) || '[]').map((report) => ({ workflowStatus: 'OPEN', archived: false, ...report })); } catch { return []; }
 }
 
 export function saveReport(report) {
@@ -19,10 +19,20 @@ export function saveReport(report) {
 
 export function getReport(id) { return getReports().find((report) => report.id === id); }
 
+export function updateReport(id, patch) {
+  const current = getReport(id);
+  if (!current) return null;
+  return saveReport({ ...current, ...(typeof patch === 'function' ? patch(current) : patch) });
+}
+
+export function archiveReport(id) { return updateReport(id, { archived: true, archivedAt: new Date().toISOString() }); }
+export function restoreReport(id) { return updateReport(id, { archived: false, archivedAt: null }); }
+
 export function computeDashboard(reports = getReports()) {
+  reports = reports.filter((item) => !item.archived);
   const compliant = reports.filter((item) => item.status === 'COMPLIANT').length;
   const nonCompliant = reports.filter((item) => item.status === 'NON_COMPLIANT').length;
-  const review = reports.filter((item) => item.status === 'REVIEW').length;
+  const review = reports.filter((item) => item.status === 'REVIEW' && item.workflowStatus !== 'RESOLVED').length;
   const products = new Set(reports.map((item) => item.details?.productId || item.details?.productName || item.id)).size;
-  return { total: reports.length, products, compliant, nonCompliant, review, rate: reports.length ? Math.round(reports.reduce((sum, item) => sum + Number(item.score || 0), 0) / reports.length) : 0 };
+  return { total: reports.length, products, compliant, nonCompliant, review, rate: reports.length ? Math.round(reports.reduce((sum, item) => sum + Number(item.verificationScore ?? item.score ?? 0), 0) / reports.length) : 0 };
 }

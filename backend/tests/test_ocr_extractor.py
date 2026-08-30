@@ -81,3 +81,27 @@ def test_does_not_use_phone_number_as_batch_or_cross_map_specialized_dates():
     assert "batch_number" not in fields
     assert "manufacture_pack_import_date" not in fields
     assert fields["best_before_or_use_by"]["value"] == "06/06/2027"
+
+
+def test_product_name_rejects_url_contact_identifiers_and_prefers_prominent_label():
+    lines = [
+        line("www.creampot.in", confidence=1.0, y=10),
+        line("customercare@creampot.in", confidence=.99, y=30),
+        line("+918484088130", confidence=.99, y=50),
+        line("11522997000407", confidence=1.0, y=70),
+        line("8906082371231", confidence=1.0, y=90),
+        {**line("CHOCOLATE", confidence=.96, y=120), "bbox": [10, 120, 500, 180]},
+        {**line("Desire", confidence=1.0, y=185), "bbox": [100, 185, 400, 225]},
+    ]
+    fields = extract_declarations(lines)
+    assert fields["product_name"]["value"] == "Chocolate Desire"
+    assert "creampot.in" not in fields["product_name"]["value"].lower()
+
+
+def test_separate_product_extractions_do_not_share_fields():
+    product_one = extract_declarations([line("MRP Rs. 220 inclusive of all taxes"), line("Net Quantity 1 L", y=30)])
+    product_two = extract_declarations([line("MRP Rs. 80 inclusive of all taxes", image_id="IMG-001"), line("Net Quantity 200 g", image_id="IMG-001", y=30)])
+    assert product_one["mrp"]["value"].startswith("MRP ₹220")
+    assert product_two["mrp"]["value"].startswith("MRP ₹80")
+    assert product_one["net_quantity"]["value"] == "1 L"
+    assert product_two["net_quantity"]["value"] == "200 g"
