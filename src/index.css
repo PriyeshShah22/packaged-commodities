@@ -1,0 +1,170 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+    /* PackMetrix Warm Editorial Precision Design Tokens */
+    --color-bg-canvas: #FAF8F5;
+    --color-surface-white: #FFFFFF;
+    --color-surface-subtle: #F4EFE6;
+    --color-surface-cream: #EFE9DE;
+    --color-surface-elevated: #FFFFFF;
+    
+    --color-text-primary: #0F172A;
+    --color-text-secondary: #475569;
+    --color-text-muted: #8C8275;
+    --color-text-dim: #D5CDC0;
+
+    --color-border-subtle: #E8E2D5;
+    --color-border-hover: #D6CEBE;
+    --color-border-focus: #0284C7;
+
+    --color-accent: #0284C7;
+    --color-accent-hover: #0369A1;
+    --color-accent-subtle: #E0F2FE;
+    --color-accent-glow: rgba(2, 132, 199, 0.15);
+
+    /* Status Colors (Legal Metrology Inspection ONLY) */
+    --color-status-pass: #10B981;
+    --color-status-pass-bg: #ECFDF5;
+    --color-status-pass-border: #A7F3D0;
+
+    --color-status-warn: #F59E0B;
+    --color-status-warn-bg: #FFFBEB;
+    --color-status-warn-border: #FDE68A;
+
+    --color-status-error: #EF4444;
+    --color-status-error-bg: #FEF2F2;
+    --color-status-error-border: #FECACA;
+
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-bg-canvas);
+    color: var(--color-text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+}
+
+/* Custom Animation Keyframes for Logo Laser/Scan Interaction */
+@keyframes logoScanBeam {
+  0% {
+    left: -15%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    left: 115%;
+    opacity: 0;
+  }
+}
+
+@keyframes laserSweepVertical {
+  0% {
+    top: 0%;
+    opacity: 0.1;
+  }
+  15% {
+    opacity: 0.85;
+  }
+  85% {
+    opacity: 0.85;
+  }
+  100% {
+    top: 100%;
+    opacity: 0.1;
+  }
+}
+
+@keyframes pulseSubtle {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+@keyframes fadeInSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-scan-beam {
+  animation: logoScanBeam 580ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+
+.animate-vertical-sweep {
+  animation: laserSweepVertical 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-fade-in-up {
+  animation: fadeInSlideUp 400ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-pulse-subtle {
+  animation: pulseSubtle 2.5s ease-in-out infinite;
+}
+
+/* Warm Editorial Micro Grid Background for Inspection Workspace */
+.bg-inspection-grid {
+  background-size: 28px 28px;
+  background-image: 
+    linear-gradient(to right, rgba(214, 206, 190, 0.45) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(214, 206, 190, 0.45) 1px, transparent 1px);
+}
+
+.bg-dot-grid {
+  background-size: 20px 20px;
+  background-image: radial-gradient(rgba(140, 130, 117, 0.22) 1.2px, transparent 1.2px);
+}
+
+.bg-warm-ivory {
+  background-color: #FAF8F5;
+}
+
+.bg-warm-cream {
+  background-color: #F4EFE6;
+}
+
+
+/* Smooth Focus Rings */
+.focus-ring {
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.focus-ring:focus-visible, .focus-ring:focus {
+  border-color: #0284C7;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+}
+
+/* Accessibility: Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
