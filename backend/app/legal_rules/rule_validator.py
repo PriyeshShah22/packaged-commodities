@@ -119,7 +119,10 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
         pattern = FORMAT_PATTERNS[validation_format]
         invalid = [item.field for item in selected if not pattern.search(item.value)]
         if invalid:
-            return {**base, "outcome": "FAIL", "reason": f"The detected {_labels(invalid)} declaration has an invalid or incomplete format."}
+            format_confirmed = all(request.field_coverage.get(field) == CoverageState.COMPLETE for field in invalid) and _all_images_sufficient(request)
+            if format_confirmed:
+                return {**base, "outcome": "FAIL", "reason": f"The detected {_labels(invalid)} declaration has an invalid format after the relevant package surfaces and image quality were confirmed."}
+            return {**base, "outcome": "REVIEW", "reason": f"The detected {_labels(invalid)} could not be normalized to the required format; verify the original package text or provide clearer evidence."}
 
     detected = "; ".join(f"{FIELD_LABELS.get(item.field, item.field)}: {item.value}" for item in selected)
     return {**base, "outcome": "PASS", "reason": f"Detected and validated: {detected}."}

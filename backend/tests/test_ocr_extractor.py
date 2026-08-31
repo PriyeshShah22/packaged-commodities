@@ -39,8 +39,8 @@ def test_label_anchoring_does_not_map_nutrition_values_to_net_quantity():
     ])
     assert fields["net_quantity"]["value"] == "200 g"
     assert fields["mrp"]["value"].startswith("MRP ₹120")
-    assert fields["manufacture_pack_import_date"]["value"] == "17/08/26"
-    assert fields["best_before_or_use_by"]["value"] == "16/10/26"
+    assert fields["manufacture_pack_import_date"]["value"] == "17/08/2026"
+    assert fields["best_before_or_use_by"]["value"] == "16/10/2026"
     assert fields["batch_number"]["value"] == "G052511"
 
 
@@ -105,3 +105,48 @@ def test_separate_product_extractions_do_not_share_fields():
     assert product_two["mrp"]["value"].startswith("MRP ₹80")
     assert product_one["net_quantity"]["value"] == "1 L"
     assert product_two["net_quantity"]["value"] == "200 g"
+
+
+def test_normalizes_common_price_date_quantity_and_batch_formats():
+    variants = [
+        ("MRP ₹23.00", "MRP ₹23.00"),
+        ("MRP 23/-", "MRP ₹23"),
+        ("MRP Rs. 23,50", "MRP ₹23.50"),
+        ("MRP INR 23", "MRP ₹23"),
+    ]
+    for text, expected in variants:
+        fields = extract_declarations([line(text)])
+        assert fields["mrp"]["value"] == expected
+        assert fields["mrp"]["raw_text"] == text
+    fields = extract_declarations([
+        line("Mfg. Date 24-11-2025", y=10),
+        line("USE BY 23.02.27", y=35),
+        line("Batch # ab-19/x", y=60),
+        line("Net Wt: 500 GMS", y=85),
+    ])
+    assert fields["manufacture_pack_import_date"]["value"] == "24/11/2025"
+    assert fields["best_before_or_use_by"]["value"] == "23/02/2027"
+    assert fields["batch_number"]["value"] == "AB-19/X"
+    assert fields["net_quantity"]["value"] == "500 g"
+    relative = extract_declarations([line("Best before 6 months from packing")])
+    assert relative["best_before_or_use_by"]["value"] == "6 months from packing"
+
+
+def test_mrp_does_not_take_adjacent_batch_number_and_back_panel_is_not_product_name():
+    fields = extract_declarations([
+        line("Batch No 016KE", y=10),
+        line("MRP ₹ 016KE 23.00 (₹ 0.23/g)", y=35),
+        line("Tis O Ram Tmakorfancy Industrialarea, Ghaziabad (U.P.)-201102", y=70),
+        line("Per Lit", y=95),
+        line("Issai", y=120),
+    ])
+    assert fields["mrp"]["value"] == "MRP ₹23.00"
+    assert "product_name" not in fields
+
+
+def test_mrp_prefers_retail_amount_over_dot_matrix_unit_price_candidate():
+    fields = extract_declarations([
+        {**line("MRP ₹0.23 inclusive of all taxes", y=35), "source_type": "dot_matrix_ocr"},
+        line("23.00 (₹0.23/g)", y=35),
+    ])
+    assert fields["mrp"]["value"] == "MRP ₹23.00 inclusive of all taxes"

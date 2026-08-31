@@ -21,9 +21,10 @@ ANCHORS = {
 EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 URL = re.compile(r"(?:\bhttps?://|\bwww\.|\b[a-z0-9][a-z0-9-]*\.(?:com|in|org|net|co\.in)\b)", re.I)
 PHONE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9](?:[\s-]?\d){9}(?!\d)")
-QUANTITY = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|gms?|gm|grams?|kgs?|kg|ml|mL|litres?|liters?|ltr|l|cm|metres?|meters?|m|nos?\.?|units?|pieces?|pairs?)\b", re.I)
-PRICE = re.compile(r"(?:₹|rs\.?|inr)?\s*(\d+(?:[.,]\d{1,2})?)", re.I)
-DATE = re.compile(r"\b(?:[0-3]?\d[/-][01]?\d[/-]\d{2,4}|(?:0?[1-9]|1[0-2])[/-]\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s/-]+\d{2,4})\b", re.I)
+QUANTITY = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|gms?|gm|grams?|kgs?|kg|ml|mL|litres?|liters?|ltr|lt|l|ℓ|cm|metres?|meters?|m|nos?\.?|units?|pieces?|pcs?|pairs?)\b", re.I)
+PRICE = re.compile(r"(?:₹|rs\.?|inr)?\s*(\d+(?:[.,]\d{1,2})?)(?:\s*/-)?(?![A-Za-z0-9])", re.I)
+DATE = re.compile(r"\b(?:[0-3]?\d[./-][01]?\d[./-]\d{2,4}|(?:0?[1-9]|1[0-2])[./-]\d{2,4}|(?:[0-3]?\d[\s./-]+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s./-]+\d{2,4})\b", re.I)
+DURATION = re.compile(r"\b\d+\s*(?:days?|weeks?|months?|years?)\s*(?:from|after)\s*(?:packing|packaging|manufacture|mfg)\b", re.I)
 BATCH = re.compile(r"\b[A-Z0-9][A-Z0-9/-]{3,}\b", re.I)
 FSSAI = re.compile(r"\b\d{14}\b")
 BARCODE = re.compile(r"\b\d{8,14}\b")
@@ -31,7 +32,7 @@ COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|i
 ADDRESS_HINT = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|india|pincode|pin|gujarat|maharashtra|delhi|mumbai|kolkata|chennai|bengaluru|bangalore|plot|sector|chamber|village|taluka)\b", re.I)
 NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?)\b", re.I)
 GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website)\b", re.I)
-PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin)\b", re.I)
+PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
 
 
 def _center(line: dict[str, Any]) -> tuple[float, float]:
@@ -53,7 +54,7 @@ def _candidate(field: str, value: str, source: list[dict[str, Any]], confidence_
     boxes = [line["bbox"] for line in source if line.get("bbox")]
     bbox = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None
     confidence = max(0, sum(float(line.get("confidence", 0)) for line in source) / max(1, len(source)) - confidence_penalty)
-    return {"field": field, "value": value.strip(" :-,;"), "confidence": round(confidence, 4), "image_id": source[0]["image_id"], "bbox": bbox, "source_type": "ocr"}
+    return {"field": field, "value": value.strip(" :-,;"), "raw_text": " ".join(line.get("text", "") for line in source).strip(), "confidence": round(confidence, 4), "image_id": source[0]["image_id"], "bbox": bbox, "source_type": "ocr"}
 
 
 def _dedupe_rank(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -81,6 +82,8 @@ def _valid_product_text(text: str) -> bool:
         and not GENERIC_LABEL.search(compact)
         and not PRODUCT_REJECT.search(compact)
         and not NUTRITION.search(compact)
+        and not re.search(r"\b\d{6}\b", compact)
+        and len(compact.split()) <= 6
     )
 
 
@@ -96,8 +99,52 @@ def _normalize_quantity(value: str) -> str:
     raw = match.group(0).replace(",", ".")
     number = re.search(r"\d+(?:\.\d+)?", raw).group(0)
     unit = re.sub(r"[\d.\s]", "", raw).lower().rstrip(".")
-    unit = {"gm": "g", "gms": "g", "gram": "g", "grams": "g", "kgs": "kg", "litre": "L", "litres": "L", "liter": "L", "liters": "L", "ltr": "L", "l": "L", "nos": "units", "no": "units"}.get(unit, unit)
+    unit = {"gm": "g", "gms": "g", "gram": "g", "grams": "g", "kgs": "kg", "litre": "L", "litres": "L", "liter": "L", "liters": "L", "ltr": "L", "lt": "L", "l": "L", "ℓ": "L", "nos": "units", "no": "units", "pc": "units", "pcs": "units", "piece": "units", "pieces": "units"}.get(unit, unit)
     return f"{number} {unit}"
+
+
+MONTHS = {name: index for index, names in enumerate((("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"), ("may",), ("jun", "june"), ("jul", "july"), ("aug", "august"), ("sep", "september"), ("oct", "october"), ("nov", "november"), ("dec", "december")), 1) for name in names}
+
+
+def _normalize_date(value: str) -> str:
+    match = DATE.search(value)
+    if not match:
+        duration = DURATION.search(value)
+        return re.sub(r"\s+", " ", duration.group(0).lower()) if duration else ""
+    raw = re.sub(r"\s+", " ", match.group(0).strip()).lower()
+    month_name = next((name for name in MONTHS if re.search(rf"\b{name}\b", raw)), None)
+    if month_name:
+        numbers = [int(number) for number in re.findall(r"\d+", raw)]
+        year = numbers[-1]; day = numbers[0] if len(numbers) > 1 else None; month = MONTHS[month_name]
+    else:
+        numbers = [int(number) for number in re.split(r"[./-]", raw)]
+        if len(numbers) == 2:
+            month, year = numbers; day = None
+        else:
+            day, month, year = numbers
+    year = year + 2000 if year < 100 else year
+    if not (2000 <= year <= 2099 and 1 <= month <= 12 and (day is None or 1 <= day <= 31)):
+        return ""
+    return f"{day:02d}/{month:02d}/{year:04d}" if day is not None else f"{month:02d}/{year:04d}"
+
+
+def _normalize_price(value: str) -> str:
+    matches = list(PRICE.finditer(value))
+    retail_matches = [match for match in matches if not re.match(r"\s*(?:/|per\s+)(?:g|kg|ml|l|unit)\b", value[match.end():], re.I)]
+    matches = retail_matches or matches
+    substantial = [match for match in matches if float(match.group(1).replace(",", ".")) >= 1]
+    matches = substantial or matches
+    if not matches:
+        return ""
+    # A decimal amount is stronger than a batch-like integer accidentally read
+    # beside the MRP label; currency markers and /- notation break remaining ties.
+    best = max(matches, key=lambda match: (bool(re.search(r"[.,]\d{1,2}", match.group(0))), bool(re.search(r"₹|rs\.?|inr|/-", match.group(0), re.I)), -match.start()))
+    amount = best.group(1).replace(",", ".")
+    if "." in amount:
+        whole, decimal = amount.split(".", 1); amount = f"{int(whole)}.{decimal.ljust(2, '0')[:2]}"
+    else:
+        amount = str(int(amount))
+    return amount
 
 
 def _extract_labeled(
@@ -127,7 +174,12 @@ def _extract_labeled(
         # label from leaking into net quantity, MRP, date, or batch fields.
         variants = [anchor["text"]] + [item["text"] for item in same_row]
         combined = " ".join(variants)
-        value = extractor(anchor["text"]) or extractor(combined)
+        extracted = [extractor(anchor["text"]), extractor(combined)]
+        values = [value for value in dict.fromkeys(extracted) if value]
+        if field == "mrp" and values:
+            value = max(values, key=lambda candidate: (float(re.search(r"\d+(?:\.\d+)?", candidate).group(0)) >= 1, bool(re.search(r"\.\d{2}\b", candidate))))
+        else:
+            value = values[0] if values else ""
         if value:
             used = [anchor] + same_row[:3]
             found.append(_candidate(field, value, used, penalty))
@@ -141,7 +193,7 @@ def _after_anchor(pattern: re.Pattern, value: str) -> str:
 def _batch_value(text: str) -> str:
     remainder = _after_anchor(ANCHORS["batch_number"], text)
     return next((
-        match.group(0)
+        match.group(0).upper()
         for match in BATCH.finditer(remainder)
         if re.search(r"\d", match.group(0))
         and not (match.group(0).isdigit() and 10 <= len(match.group(0)) <= 14)
@@ -161,21 +213,27 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
         def mrp_value(text: str) -> str:
             remainder = _after_anchor(ANCHORS["mrp"], text)
-            amount = PRICE.search(remainder)
+            amount = _normalize_price(remainder)
             if not amount:
                 return ""
             taxes = " inclusive of all taxes" if re.search(r"(?:incl|all\s+tax)", text, re.I) else ""
-            return f"MRP ₹{amount.group(1)}{taxes}"
+            return f"MRP ₹{amount}{taxes}"
         candidates["mrp"] += _extract_labeled("mrp", image_lines, mrp_value)
+        for item in image_lines:
+            if not ANCHORS["mrp"].search(item["text"]) and re.search(r"₹|\brs\.?\s|\binr\b", item["text"], re.I) and not re.search(r"\bper\b|/\s*(?:g|kg|ml|l)\b", item["text"], re.I):
+                amount = _normalize_price(item["text"])
+                if amount:
+                    taxes = " inclusive of all taxes" if re.search(r"(?:incl|all\s+tax)", item["text"], re.I) else ""
+                    candidates["mrp"].append(_candidate("mrp", f"MRP ₹{amount}{taxes}", [item], .08))
 
         def unit_price(text: str) -> str:
-            price = PRICE.search(_after_anchor(ANCHORS["unit_sale_price"], text))
+            price = _normalize_price(_after_anchor(ANCHORS["unit_sale_price"], text))
             per = re.search(r"(?:per|/)\s*(?:g|kg|ml|l|m|cm|unit|number)\b", text, re.I)
-            return f"₹{price.group(1)} {per.group(0)}" if price and per else ""
+            return f"₹{price} {per.group(0)}" if price and per else ""
         candidates["unit_sale_price"] += _extract_labeled("unit_sale_price", image_lines, unit_price)
 
         for field in ("manufacture_pack_import_date", "best_before_or_use_by"):
-            candidates[field] += _extract_labeled(field, image_lines, lambda text: DATE.search(text).group(0) if DATE.search(text) else "")
+            candidates[field] += _extract_labeled(field, image_lines, _normalize_date)
 
         candidates["batch_number"] += _extract_labeled("batch_number", image_lines, _batch_value)
         candidates["fssai_license"] += _extract_labeled("fssai_license", image_lines, lambda text: FSSAI.search(text).group(0) if FSSAI.search(text) else "")
@@ -210,7 +268,7 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             fssai = FSSAI.search(text)
             if fssai and re.search(r"fssai|ssai|lic", text, re.I): candidates["fssai_license"].append(_candidate("fssai_license", fssai.group(0), [anchor]))
             barcode = BARCODE.fullmatch(re.sub(r"\s", "", text))
-            if barcode and not FSSAI.fullmatch(barcode.group(0)): candidates["barcode"].append(_candidate("barcode", barcode.group(0), [anchor], .05))
+            if barcode and not FSSAI.fullmatch(barcode.group(0)) and not PHONE.fullmatch(barcode.group(0)): candidates["barcode"].append(_candidate("barcode", barcode.group(0), [anchor], .05))
 
         # Product display name: prominent non-legal, non-nutrition text. It is kept
         # separate from the statutory common/generic commodity declaration.
@@ -220,7 +278,9 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             box = item.get("bbox") or [0, 0, 0, 0]
             height = box[3] - box[1]
             width = box[2] - box[0]
-            if _valid_product_text(text):
+            heights = [max(1, (line.get("bbox") or [0, 0, 0, 0])[3] - (line.get("bbox") or [0, 0, 0, 0])[1]) for line in image_lines]
+            median_height = sorted(heights)[len(heights) // 2] if heights else 1
+            if _valid_product_text(text) and height >= max(24, median_height * 1.25):
                 # Display names tend to be large, wide text on a front panel.
                 # Confidence breaks ties, but cannot make a URL or identifier a name.
                 display.append((height * 2.2 + min(width, 900) * .03 + item["confidence"] * 20, item))
@@ -242,6 +302,8 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
     fields: dict[str, dict[str, Any]] = {}
     for field, items in candidates.items():
         ranked = _dedupe_rank(items)
+        if field == "mrp":
+            ranked.sort(key=lambda item: (item["confidence"] + (.12 if re.search(r"₹\d+\.\d{2}\b", item["value"]) else 0) + (.03 if "inclusive of all taxes" in item["value"].lower() else 0)), reverse=True)
         if ranked:
             fields[field] = {**ranked[0], "alternatives": ranked[1:4]}
     return fields

@@ -50,6 +50,8 @@ def _recognize_row(engine: Any, row: np.ndarray) -> tuple[str, float]:
         best_rank = best[1] + min(0.12, sum(character.isalnum() for character in best[0]) * 0.008)
         if rank > best_rank:
             best = (text, score)
+        if score >= 0.96 and sum(character.isalnum() for character in text) >= 4:
+            break
     return best
 
 
@@ -193,6 +195,8 @@ def extract_dot_matrix_lines(image: np.ndarray, result: Any, image_id: str, engi
             normalized, penalty = _normalize(field, raw)
             if normalized and confidence - penalty > best[2] - best[3]:
                 best = (normalized, raw, confidence, penalty, top, bottom)
+            if normalized and confidence - penalty >= 0.90:
+                break
         normalized, raw, confidence, penalty, top, bottom = best
         if not normalized:
             continue

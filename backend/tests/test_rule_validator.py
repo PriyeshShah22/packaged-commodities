@@ -77,3 +77,11 @@ def test_valid_mrp_passes_with_bbox_evidence():
     result = validate_rule(rule("LMPC-R6-1E-MRP"), request)
     assert result["outcome"] == "PASS"
     assert result["evidence"][0]["bbox"] == [120.0, 420.0, 310.0, 470.0]
+
+
+def test_invalid_format_is_review_until_coverage_and_quality_are_confirmed():
+    evidence = [EvidenceItem(field="mrp", value="MRP ₹016", confidence=0.99, image_id="IMG-001")]
+    uncertain = retail_request(evidence=evidence, field_coverage={"mrp": "incomplete"}, image_quality=[ImageQuality(image_id="IMG-001", status="sufficient")])
+    assert validate_rule(rule("LMPC-R6-1E-MRP"), uncertain)["outcome"] == "REVIEW"
+    confirmed = retail_request(evidence=evidence, field_coverage={"mrp": "complete"}, image_quality=[ImageQuality(image_id="IMG-001", status="sufficient")])
+    assert validate_rule(rule("LMPC-R6-1E-MRP"), confirmed)["outcome"] == "FAIL"

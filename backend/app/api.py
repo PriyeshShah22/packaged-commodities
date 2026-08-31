@@ -1,4 +1,9 @@
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+import re
+
+import cv2
+import numpy as np
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Response, UploadFile
 from sqlalchemy import select
@@ -21,6 +26,41 @@ router = APIRouter()
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
+
+
+def _image_hash(content: bytes) -> str:
+    image = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        return ""
+    small = cv2.resize(image, (9, 8), interpolation=cv2.INTER_AREA)
+    return "".join("1" if value else "0" for value in (small[:, 1:] > small[:, :-1]).flatten())
+
+
+def _color_signature(content: bytes) -> list[float]:
+    image = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return []
+    hsv = cv2.cvtColor(cv2.resize(image, (160, 160), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2HSV)
+    histogram = cv2.calcHist([hsv], [0, 1], None, [16, 4], [0, 180, 0, 256]).flatten()
+    norm = float(np.linalg.norm(histogram)) or 1.0
+    return [round(float(value / norm), 5) for value in histogram]
+
+
+def _field_value(fields: dict, name: str) -> str:
+    return str((fields.get(name) or {}).get("value") or "").strip()
+
+
+def _tokens(value: str) -> set[str]:
+    ignored = {"the", "and", "food", "foods", "private", "pvt", "ltd", "limited", "india"}
+    return {token for token in re.findall(r"[a-z0-9]+", value.lower()) if len(token) > 2 and token not in ignored}
+
+
+def _hash_distance(left: str, right: str) -> int:
+    return sum(a != b for a, b in zip(left, right, strict=False)) if left and right else 64
+
+
+def _color_similarity(left: list[float], right: list[float]) -> float:
+    return float(np.dot(left, right)) if left and right else 0.0
 
 
 def user_payload(user: User) -> dict:
@@ -93,21 +133,28 @@ def extract_image_declarations(files: list[UploadFile] = File(...), _: User = De
     if not files or len(files) > 12:
         raise HTTPException(status_code=400, detail="Upload between 1 and 12 package images.")
 
-    all_lines = []
-    image_results = []
+    uploads = []
     for index, uploaded in enumerate(files):
         if uploaded.content_type not in ALLOWED_IMAGE_TYPES:
             raise HTTPException(status_code=415, detail=f"Unsupported image type: {uploaded.content_type}")
         content = uploaded.file.read(MAX_IMAGE_BYTES + 1)
         if len(content) > MAX_IMAGE_BYTES:
             raise HTTPException(status_code=413, detail=f"{uploaded.filename} exceeds the 15 MB image limit.")
+        uploads.append((index, uploaded.filename, content))
+
+    def process(item):
+        index, filename, content = item
         image_id = f"IMG-{index + 1:03d}"
         try:
             lines, quality = run_ocr(content, image_id)
         except ValueError as error:
-            raise HTTPException(status_code=422, detail=f"{uploaded.filename}: {error}") from error
-        all_lines.extend(lines)
-        image_results.append({"image_id": image_id, "file_name": uploaded.filename, "quality": quality, "line_count": len(lines), "lines": lines})
+            raise HTTPException(status_code=422, detail=f"{filename}: {error}") from error
+        return {"image_id": image_id, "file_name": filename, "quality": quality, "line_count": len(lines), "lines": lines}
+
+    # Two workers keeps memory/CPU bounded while allowing independent panels to overlap.
+    with ThreadPoolExecutor(max_workers=min(2, len(uploads))) as executor:
+        image_results = list(executor.map(process, uploads))
+    all_lines = [line for image in image_results for line in image["lines"]]
 
     return {
         "engine": "RapidOCR PP-OCRv6 / ONNX Runtime",
@@ -115,6 +162,65 @@ def extract_image_declarations(files: list[UploadFile] = File(...), _: User = De
         "total_lines": len(all_lines),
         "fields": extract_declarations(all_lines),
     }
+
+
+@router.post("/ocr/bulk-group")
+def bulk_group_images(files: list[UploadFile] = File(...), _: User = Depends(require_roles("inspector", "admin"))):
+    if not files or len(files) > 60:
+        raise HTTPException(status_code=400, detail="Upload between 1 and 60 package images for bulk grouping.")
+    uploads = []
+    for index, uploaded in enumerate(files):
+        if uploaded.content_type not in ALLOWED_IMAGE_TYPES:
+            raise HTTPException(status_code=415, detail=f"Unsupported image type: {uploaded.content_type}")
+        content = uploaded.file.read(MAX_IMAGE_BYTES + 1)
+        if len(content) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail=f"{uploaded.filename} exceeds the 15 MB image limit.")
+        uploads.append((index, uploaded.filename, content))
+
+    def process(item):
+        index, filename, content = item
+        image_id = f"BULK-{index + 1:03d}"
+        lines, quality = run_ocr(content, image_id)
+        fields = extract_declarations(lines)
+        return {"index": index, "image_id": image_id, "file_name": filename, "quality": quality, "lines": lines, "fields": fields, "visual_hash": _image_hash(content), "color_signature": _color_signature(content)}
+
+    with ThreadPoolExecutor(max_workers=min(2, len(uploads))) as executor:
+        images = list(executor.map(process, uploads))
+
+    groups: list[dict] = []
+    for image in images:
+        barcode = _field_value(image["fields"], "barcode")
+        identity = _tokens(" ".join((_field_value(image["fields"], "product_name"), _field_value(image["fields"], "commodity_name"))))
+        party = _tokens(_field_value(image["fields"], "responsible_party_name"))
+        best = None
+        for group in groups:
+            same_barcode = bool(barcode and barcode in group["barcodes"])
+            identity_overlap = len(identity & group["identity_tokens"]) / max(1, len(identity | group["identity_tokens"]))
+            party_overlap = bool(party and party & group["party_tokens"])
+            visually_close = any(_hash_distance(image["visual_hash"], value) <= 8 for value in group["hashes"])
+            color_similarity = max((_color_similarity(image["color_signature"], value) for value in group["colors"]), default=0)
+            appearance_identity = (visually_close or color_similarity >= .78) and (identity_overlap >= .25 or party_overlap)
+            exceptionally_similar = color_similarity >= .97
+            score = 1.0 if same_barcode else .86 if identity_overlap >= .6 else .80 if appearance_identity else .76 if exceptionally_similar else 0
+            if score and (best is None or score > best[0]):
+                best = (score, group, "Barcode / GTIN match" if same_barcode else "Product text match" if identity_overlap >= .6 else "Visual and label identity match")
+        if best:
+            score, group, reason = best
+            group["images"].append(image); group["confidence"] = min(group["confidence"], score); group["reason"] = reason
+            group["barcodes"].add(barcode); group["identity_tokens"].update(identity); group["party_tokens"].update(party); group["hashes"].append(image["visual_hash"]); group["colors"].append(image["color_signature"])
+        else:
+            groups.append({"id": f"GROUP-{len(groups) + 1:03d}", "images": [image], "confidence": 1.0 if barcode else .65 if identity else .45, "reason": "Barcode-backed product identity" if barcode else "Single-view identity needs confirmation", "barcodes": {barcode}, "identity_tokens": set(identity), "party_tokens": set(party), "hashes": [image["visual_hash"]], "colors": [image["color_signature"]]})
+
+    response_groups = []
+    for group in groups:
+        lines = [line for image in group["images"] for line in image["lines"]]
+        fields = extract_declarations(lines)
+        product = fields.get("product_name") or {}; commodity = fields.get("commodity_name") or {}
+        name = str(product.get("value") or "") if float(product.get("confidence") or 0) >= .75 else str(commodity.get("value") or "") if float(commodity.get("confidence") or 0) >= .8 else ""
+        name = name or "Unidentified product"
+        needs_confirmation = group["confidence"] < .75 or (len(group["images"]) == 1 and name == "Unidentified product")
+        response_groups.append({"id": group["id"], "name": name, "confidence": group["confidence"], "needs_confirmation": needs_confirmation, "reason": group["reason"] if not needs_confirmation else "Product identity or grouping needs confirmation", "fields": fields, "images": group["images"]})
+    return {"image_count": len(images), "group_count": len(response_groups), "groups": response_groups}
 
 
 @router.post("/reports/pdf")

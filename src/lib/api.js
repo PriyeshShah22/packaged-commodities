@@ -47,6 +47,14 @@ export async function extractImages(files, token) {
   return readResponse(response, 'OCR extraction failed for the uploaded images.');
 }
 
+export async function groupBulkImages(files, token) {
+  const formData = new FormData(); files.forEach((file) => formData.append('files', file));
+  let response;
+  try { response = await fetch(`${API_URL}/api/v1/ocr/bulk-group`, { method: 'POST', headers: authHeaders(token), body: formData }); }
+  catch { throw new Error('The bulk OCR service is not reachable. Confirm that the backend on port 8000 is running.'); }
+  return readResponse(response, 'Bulk image grouping failed.');
+}
+
 export async function downloadReportPdf(report, token) {
   const response = await fetch(`${API_URL}/api/v1/reports/pdf`, { method: 'POST', headers: authHeaders(token, true), body: JSON.stringify(report) });
   if (!response.ok) {

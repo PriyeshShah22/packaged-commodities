@@ -1,10 +1,18 @@
 const KEY = 'packmetrix_reports_v2';
+const BULK_KEY = 'packmetrix_bulk_batches_v1';
+
+function withScore(report) {
+  const numeric = Number(report.verificationScore ?? report.score ?? 0);
+  const score = Number.isFinite(numeric) ? numeric : 0;
+  return { workflowStatus: 'OPEN', archived: false, ...report, verificationScore: score, score };
+}
 
 export function getReports() {
-  try { return JSON.parse(localStorage.getItem(KEY) || '[]').map((report) => ({ workflowStatus: 'OPEN', archived: false, ...report })); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem(KEY) || '[]').map(withScore); } catch { return []; }
 }
 
 export function saveReport(report) {
+  report = withScore(report);
   const reports = getReports().filter((item) => item.id !== report.id);
   const next = [report, ...reports].slice(0, 60);
   try {
@@ -27,6 +35,20 @@ export function updateReport(id, patch) {
 
 export function archiveReport(id) { return updateReport(id, { archived: true, archivedAt: new Date().toISOString() }); }
 export function restoreReport(id) { return updateReport(id, { archived: false, archivedAt: null }); }
+
+export function getBulkBatches() {
+  try { return JSON.parse(localStorage.getItem(BULK_KEY) || '[]'); } catch { return []; }
+}
+
+export function getBulkBatch(id) { return getBulkBatches().find((batch) => batch.id === id); }
+
+export function saveBulkBatch(batch) {
+  const batches = getBulkBatches().filter((item) => item.id !== batch.id);
+  const next = [{ ...batch, updatedAt: new Date().toISOString() }, ...batches].slice(0, 10);
+  try { localStorage.setItem(BULK_KEY, JSON.stringify(next)); }
+  catch { localStorage.setItem(BULK_KEY, JSON.stringify(next.map((item) => ({ ...item, groups: item.groups.map((group) => ({ ...group, images: group.images.map((image) => ({ ...image, thumbnail: '' })) })) })))); }
+  return batch;
+}
 
 export function computeDashboard(reports = getReports()) {
   reports = reports.filter((item) => !item.archived);
