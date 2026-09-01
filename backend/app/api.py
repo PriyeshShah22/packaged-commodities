@@ -26,6 +26,7 @@ router = APIRouter()
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
+MAX_OCR_WORKERS = 3
 
 
 def _image_hash(content: bytes) -> str:
@@ -53,6 +54,29 @@ def _field_value(fields: dict, name: str) -> str:
 def _tokens(value: str) -> set[str]:
     ignored = {"the", "and", "food", "foods", "private", "pvt", "ltd", "limited", "india"}
     return {token for token in re.findall(r"[a-z0-9]+", value.lower()) if len(token) > 2 and token not in ignored}
+
+
+def _grouping_tokens(lines: list[dict], fields: dict) -> set[str]:
+    """Identity hints used only for grouping, never as the displayed product name."""
+    result = _tokens(" ".join((_field_value(fields, "product_name"), _field_value(fields, "commodity_name"))))
+    rejected = re.compile(r"\b(?:mrp|net|batch|date|fssai|licen[cs]e|manufactured|marketed|packed|address|consumer|customer|nutrition|ingredients?|calories|protein|quantity|price)\b", re.I)
+    for line in lines:
+        text = str(line.get("text") or "").strip()
+        confidence = float(line.get("confidence") or 0)
+        if confidence < .70 or rejected.search(text) or sum(character.isdigit() for character in text) > 3:
+            continue
+        result.update(_tokens(text))
+        for domain in re.findall(r"(?:www\.)?([a-z][a-z0-9-]{3,})\.(?:in|com|co\.in|net|org)\b", text, re.I):
+            result.add(domain.lower())
+    return result
+
+
+def _token_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    exact = len(left & right) / max(1, len(left | right))
+    fuzzy_matches = sum(any(a in b or b in a for b in right) for a in left if len(a) >= 5)
+    return max(exact, fuzzy_matches / max(1, min(len(left), len(right))))
 
 
 def _hash_distance(left: str, right: str) -> int:
@@ -151,8 +175,8 @@ def extract_image_declarations(files: list[UploadFile] = File(...), _: User = De
             raise HTTPException(status_code=422, detail=f"{filename}: {error}") from error
         return {"image_id": image_id, "file_name": filename, "quality": quality, "line_count": len(lines), "lines": lines}
 
-    # Two workers keeps memory/CPU bounded while allowing independent panels to overlap.
-    with ThreadPoolExecutor(max_workers=min(2, len(uploads))) as executor:
+    # Keep concurrency bounded while allowing front/back/side panels to overlap.
+    with ThreadPoolExecutor(max_workers=min(MAX_OCR_WORKERS, len(uploads))) as executor:
         image_results = list(executor.map(process, uploads))
     all_lines = [line for image in image_results for line in image["lines"]]
 
@@ -182,34 +206,36 @@ def bulk_group_images(files: list[UploadFile] = File(...), _: User = Depends(req
         image_id = f"BULK-{index + 1:03d}"
         lines, quality = run_ocr(content, image_id)
         fields = extract_declarations(lines)
-        return {"index": index, "image_id": image_id, "file_name": filename, "quality": quality, "lines": lines, "fields": fields, "visual_hash": _image_hash(content), "color_signature": _color_signature(content)}
+        return {"index": index, "image_id": image_id, "file_name": filename, "quality": quality, "lines": lines, "fields": fields, "grouping_tokens": _grouping_tokens(lines, fields), "visual_hash": _image_hash(content), "color_signature": _color_signature(content)}
 
-    with ThreadPoolExecutor(max_workers=min(2, len(uploads))) as executor:
+    with ThreadPoolExecutor(max_workers=min(MAX_OCR_WORKERS, len(uploads))) as executor:
         images = list(executor.map(process, uploads))
 
     groups: list[dict] = []
     for image in images:
         barcode = _field_value(image["fields"], "barcode")
         identity = _tokens(" ".join((_field_value(image["fields"], "product_name"), _field_value(image["fields"], "commodity_name"))))
+        grouping_identity = image["grouping_tokens"]
         party = _tokens(_field_value(image["fields"], "responsible_party_name"))
         best = None
         for group in groups:
             same_barcode = bool(barcode and barcode in group["barcodes"])
             identity_overlap = len(identity & group["identity_tokens"]) / max(1, len(identity | group["identity_tokens"]))
+            grouping_overlap = _token_similarity(grouping_identity, group["grouping_tokens"])
             party_overlap = bool(party and party & group["party_tokens"])
             visually_close = any(_hash_distance(image["visual_hash"], value) <= 8 for value in group["hashes"])
             color_similarity = max((_color_similarity(image["color_signature"], value) for value in group["colors"]), default=0)
-            appearance_identity = (visually_close or color_similarity >= .78) and (identity_overlap >= .25 or party_overlap)
+            appearance_identity = (visually_close or color_similarity >= .68) and (identity_overlap >= .25 or grouping_overlap >= .20 or party_overlap)
             exceptionally_similar = color_similarity >= .97
-            score = 1.0 if same_barcode else .86 if identity_overlap >= .6 else .80 if appearance_identity else .76 if exceptionally_similar else 0
+            score = 1.0 if same_barcode else .86 if identity_overlap >= .6 or grouping_overlap >= .45 else .78 if appearance_identity else .76 if exceptionally_similar else 0
             if score and (best is None or score > best[0]):
                 best = (score, group, "Barcode / GTIN match" if same_barcode else "Product text match" if identity_overlap >= .6 else "Visual and label identity match")
         if best:
             score, group, reason = best
             group["images"].append(image); group["confidence"] = min(group["confidence"], score); group["reason"] = reason
-            group["barcodes"].add(barcode); group["identity_tokens"].update(identity); group["party_tokens"].update(party); group["hashes"].append(image["visual_hash"]); group["colors"].append(image["color_signature"])
+            group["barcodes"].add(barcode); group["identity_tokens"].update(identity); group["grouping_tokens"].update(grouping_identity); group["party_tokens"].update(party); group["hashes"].append(image["visual_hash"]); group["colors"].append(image["color_signature"])
         else:
-            groups.append({"id": f"GROUP-{len(groups) + 1:03d}", "images": [image], "confidence": 1.0 if barcode else .65 if identity else .45, "reason": "Barcode-backed product identity" if barcode else "Single-view identity needs confirmation", "barcodes": {barcode}, "identity_tokens": set(identity), "party_tokens": set(party), "hashes": [image["visual_hash"]], "colors": [image["color_signature"]]})
+            groups.append({"id": f"GROUP-{len(groups) + 1:03d}", "images": [image], "confidence": 1.0 if barcode else .65 if identity else .45, "reason": "Barcode-backed product identity" if barcode else "Single-view identity needs confirmation", "barcodes": {barcode}, "identity_tokens": set(identity), "grouping_tokens": set(grouping_identity), "party_tokens": set(party), "hashes": [image["visual_hash"]], "colors": [image["color_signature"]]})
 
     response_groups = []
     for group in groups:

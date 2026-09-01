@@ -1,4 +1,5 @@
 import base64
+import os
 from io import BytesIO
 from typing import Any
 
@@ -7,11 +8,27 @@ from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import HRFlowable, Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 NAVY, BLUE, SLATE = colors.HexColor("#020817"), colors.HexColor("#0284C7"), colors.HexColor("#475569")
 PALE, BORDER = colors.HexColor("#F8FAFC"), colors.HexColor("#CBD5E1")
 GREEN, AMBER, RED = colors.HexColor("#047857"), colors.HexColor("#B45309"), colors.HexColor("#BE123C")
+
+
+def _register_fonts() -> tuple[str, str]:
+    regular = r"C:\Windows\Fonts\arial.ttf"
+    bold = r"C:\Windows\Fonts\arialbd.ttf"
+    if os.path.exists(regular) and os.path.exists(bold):
+        if "PMRegular" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont("PMRegular", regular))
+            pdfmetrics.registerFont(TTFont("PMBold", bold))
+        return "PMRegular", "PMBold"
+    return "Helvetica", "Helvetica-Bold"
+
+
+REGULAR_FONT, BOLD_FONT = _register_fonts()
 
 
 def _safe(value: Any, fallback: str = "Not reliably detected") -> str:
@@ -20,15 +37,15 @@ def _safe(value: Any, fallback: str = "Not reliably detected") -> str:
 
 def _styles():
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="PMKicker", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=7.5, leading=10, textColor=BLUE, tracking=1.1))
-    styles.add(ParagraphStyle(name="PMTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=22, leading=27, textColor=NAVY, alignment=0, spaceAfter=3))
-    styles.add(ParagraphStyle(name="PMMeta", parent=styles["Normal"], fontSize=8, leading=11, textColor=SLATE))
-    styles.add(ParagraphStyle(name="PMSection", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=13, leading=17, textColor=NAVY, spaceAfter=7))
-    styles.add(ParagraphStyle(name="PMBody", parent=styles["BodyText"], fontSize=8.5, leading=12.5, textColor=colors.HexColor("#334155")))
-    styles.add(ParagraphStyle(name="PMSmall", parent=styles["Normal"], fontSize=7.5, leading=10.5, textColor=SLATE))
-    styles.add(ParagraphStyle(name="PMLabel", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=7, leading=9, textColor=SLATE))
-    styles.add(ParagraphStyle(name="PMValue", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=8.5, leading=12, textColor=NAVY))
-    styles.add(ParagraphStyle(name="PMStatus", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=14, leading=18, textColor=NAVY))
+    styles.add(ParagraphStyle(name="PMKicker", parent=styles["Normal"], fontName=BOLD_FONT, fontSize=7.5, leading=10, textColor=BLUE, tracking=1.1))
+    styles.add(ParagraphStyle(name="PMTitle", parent=styles["Title"], fontName=BOLD_FONT, fontSize=22, leading=27, textColor=NAVY, alignment=0, spaceAfter=3))
+    styles.add(ParagraphStyle(name="PMMeta", parent=styles["Normal"], fontName=REGULAR_FONT, fontSize=8, leading=11, textColor=SLATE))
+    styles.add(ParagraphStyle(name="PMSection", parent=styles["Heading2"], fontName=BOLD_FONT, fontSize=13, leading=17, textColor=NAVY, spaceAfter=7))
+    styles.add(ParagraphStyle(name="PMBody", parent=styles["BodyText"], fontName=REGULAR_FONT, fontSize=8.5, leading=12.5, textColor=colors.HexColor("#334155")))
+    styles.add(ParagraphStyle(name="PMSmall", parent=styles["Normal"], fontName=REGULAR_FONT, fontSize=7.5, leading=10.5, textColor=SLATE))
+    styles.add(ParagraphStyle(name="PMLabel", parent=styles["Normal"], fontName=BOLD_FONT, fontSize=7, leading=9, textColor=SLATE))
+    styles.add(ParagraphStyle(name="PMValue", parent=styles["Normal"], fontName=BOLD_FONT, fontSize=8.5, leading=12, textColor=NAVY))
+    styles.add(ParagraphStyle(name="PMStatus", parent=styles["Normal"], fontName=BOLD_FONT, fontSize=14, leading=18, textColor=NAVY))
     styles.add(ParagraphStyle(name="PMRight", parent=styles["PMMeta"], alignment=TA_RIGHT))
     return styles
 
@@ -36,9 +53,9 @@ def _styles():
 def _page(canvas, document):
     canvas.saveState(); width, height = A4
     canvas.setFillColor(NAVY); canvas.rect(0, height - 8 * mm, width, 8 * mm, fill=1, stroke=0)
-    canvas.setFont("Helvetica-Bold", 7); canvas.setFillColor(colors.white); canvas.drawString(16 * mm, height - 5.2 * mm, "PACKMETRIX  |  LEGAL METROLOGY INSPECTION")
+    canvas.setFont(BOLD_FONT, 7); canvas.setFillColor(colors.white); canvas.drawString(16 * mm, height - 5.2 * mm, "PACKMETRIX  |  LEGAL METROLOGY INSPECTION")
     canvas.setStrokeColor(BORDER); canvas.line(16 * mm, 12 * mm, width - 16 * mm, 12 * mm)
-    canvas.setFillColor(SLATE); canvas.setFont("Helvetica", 7); canvas.drawString(16 * mm, 7.5 * mm, "AI-assisted decision support - final determination remains with the authorized officer")
+    canvas.setFillColor(SLATE); canvas.setFont(REGULAR_FONT, 7); canvas.drawString(16 * mm, 7.5 * mm, "AI-assisted decision support - final determination remains with the authorized officer")
     canvas.drawRightString(width - 16 * mm, 7.5 * mm, f"Page {document.page}"); canvas.restoreState()
 
 
@@ -49,7 +66,10 @@ def _status(report):
 
 def _summary(report, styles):
     counts = report.get("counts") or {}; score = int(report.get("verificationScore", report.get("score") or 0))
-    data = [[Paragraph("ASSESSMENT", styles["PMLabel"]), Paragraph("EVIDENCE VERIFICATION", styles["PMLabel"]), Paragraph("FINDINGS", styles["PMLabel"])], [Paragraph(_safe(_status(report)), styles["PMStatus"]), Paragraph(f"{score}% complete", styles["PMStatus"]), Paragraph(f"<b>{counts.get('PASS', 0)}</b> passed<br/><b>{counts.get('FAIL', 0)}</b> potential issues<br/><b>{counts.get('REVIEW', 0)}</b> need verification", styles["PMBody"])]]
+    verification = report.get("verification") or {}
+    total = int(verification.get("total", sum(int(counts.get(key, 0)) for key in ("PASS", "FAIL", "REVIEW"))))
+    verified = int(verification.get("verified", int(counts.get("PASS", 0)) + int(counts.get("FAIL", 0))))
+    data = [[Paragraph("ASSESSMENT", styles["PMLabel"]), Paragraph("EVIDENCE VERIFICATION", styles["PMLabel"]), Paragraph("FINDINGS", styles["PMLabel"])], [Paragraph(_safe(_status(report)), styles["PMStatus"]), Paragraph(f"{verified}/{total} checks - {score}%", styles["PMStatus"]), Paragraph(f"<b>{counts.get('PASS', 0)}</b> passed<br/><b>{counts.get('FAIL', 0)}</b> potential issues<br/><b>{counts.get('REVIEW', 0)}</b> need verification", styles["PMBody"])]]
     table = Table(data, colWidths=[58 * mm, 52 * mm, 60 * mm])
     table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0F9FF")), ("BOX", (0, 0), (-1, -1), .6, colors.HexColor("#BAE6FD")), ("LINEBEFORE", (1, 0), (-1, -1), .4, colors.HexColor("#BAE6FD")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("PADDING", (0, 0), (-1, -1), 8)]))
     return table
@@ -91,17 +111,20 @@ def _evidence(report, styles):
 def _story(report, styles, title=True):
     reviewer = report.get("reviewedBy") or {}; result = []
     if title: result += [Paragraph("OFFICIAL INSPECTION RECORD", styles["PMKicker"]), Paragraph("Packaged Commodity Inspection Report", styles["PMTitle"])]
-    meta = Table([[Paragraph(f"<b>Report ID</b><br/>{_safe(report.get('id'))}", styles["PMMeta"]), Paragraph(f"<b>Inspection date and time</b><br/>{_safe(report.get('date'))}", styles["PMMeta"]), Paragraph(f"<b>Inspector</b><br/>{_safe(report.get('inspectorName'))}", styles["PMRight"])]], colWidths=[57 * mm, 60 * mm, 53 * mm])
+    meta = Table([[Paragraph(f"<b>Report ID</b><br/>{_safe(report.get('id'))}<br/><b>Inspection ID</b><br/>{_safe(report.get('inspectionId') or report.get('id'))}", styles["PMMeta"]), Paragraph(f"<b>Batch ID</b><br/>{_safe(report.get('batchId'), 'Single inspection')}<br/><b>Inspection date and time</b><br/>{_safe(report.get('date'))}", styles["PMMeta"]), Paragraph(f"<b>Inspector</b><br/>{_safe(report.get('inspectorName'))}<br/><b>Rule set</b><br/>{_safe(report.get('ruleSetAsOf') or report.get('ruleSetVersion'), 'Configured Legal Metrology rules')}", styles["PMRight"])]], colWidths=[57 * mm, 60 * mm, 53 * mm])
     meta.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 0)]))
     result += [meta, Spacer(1, 5 * mm), _summary(report, styles), Spacer(1, 6 * mm), Paragraph("Product information and extracted declarations", styles["PMSection"]), _details(report, styles), Spacer(1, 6 * mm), Paragraph("Compliance findings", styles["PMSection"])]
     findings = [x for x in (report.get("results") or []) if x.get("outcome") != "NOT_APPLICABLE"]
     for item in findings: result += [_finding(item, styles), Spacer(1, 2.3 * mm)]
     if not findings: result.append(Paragraph("No applicable findings were recorded.", styles["PMBody"]))
     result += [Spacer(1, 4 * mm), Paragraph("Submitted evidence", styles["PMSection"]), _evidence(report, styles), Paragraph(f"{int(report.get('imageCount') or 0)} package surface image(s) submitted. Raw OCR transcripts and debug confidence dumps are excluded from this officer-facing report.", styles["PMSmall"]), Spacer(1, 5 * mm), Paragraph("Officer determination", styles["PMSection"])]
-    decisions = [("Report status", _status(report)), ("Final decision", report.get("finalDecision") or "Pending officer review"), ("Officer remarks", report.get("officerRemarks") or "No final officer remark recorded"), ("Reviewed by", reviewer.get("name") or report.get("inspectorName") or "Pending"), ("Reviewed at", report.get("reviewedAt") or "Pending")]
+    decisions = [("AI screening result", report.get("aiStatus") or report.get("status") or "Needs review"), ("Report status", _status(report)), ("Final officer determination", report.get("finalDecision") or "Pending officer review"), ("Officer remarks", report.get("officerRemarks") or "No final officer remark recorded"), ("Reviewed by", reviewer.get("name") or report.get("inspectorName") or "Pending"), ("Final review timestamp", report.get("reviewedAt") or "Pending"), ("Evidence references", f"{int(report.get('imageCount') or 0)} submitted package surface image(s)")]
     table = Table([[Paragraph(f"<b>{_safe(k)}</b>", styles["PMSmall"]), Paragraph(_safe(v), styles["PMBody"])] for k, v in decisions], colWidths=[42 * mm, 128 * mm])
     table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .35, BORDER), ("BACKGROUND", (0, 0), (0, -1), PALE), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 7)]))
-    result += [table, Spacer(1, 6 * mm), HRFlowable(width="100%", thickness=.5, color=BORDER), Spacer(1, 2 * mm), Paragraph("This report records machine-assisted extraction and deterministic rule screening. REVIEW is not a final finding of non-compliance. Officer-verified outcomes reflect the recorded authorized-officer decision.", styles["PMSmall"])]
+    result += [table]
+    if report.get("workflowStatus") == "RESOLVED":
+        result += [Spacer(1, 8 * mm), Table([[Paragraph("Authorized officer signature / verification", styles["PMLabel"]), Paragraph("Date", styles["PMLabel"])], [Paragraph("\n\n________________________________________", styles["PMBody"]), Paragraph("\n\n____________________", styles["PMBody"])]], colWidths=[125 * mm, 45 * mm], style=TableStyle([("BOX", (0, 0), (-1, -1), .35, BORDER), ("GRID", (0, 0), (-1, -1), .35, BORDER), ("PADDING", (0, 0), (-1, -1), 7)]))]
+    result += [Spacer(1, 6 * mm), HRFlowable(width="100%", thickness=.5, color=BORDER), Spacer(1, 2 * mm), Paragraph("This report records machine-assisted extraction and deterministic rule screening. REVIEW is not a final finding of non-compliance. Officer-verified outcomes reflect the recorded authorized-officer decision.", styles["PMSmall"])]
     return result
 
 

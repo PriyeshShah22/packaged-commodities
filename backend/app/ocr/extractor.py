@@ -5,15 +5,15 @@ from typing import Any, Callable
 
 
 ANCHORS = {
-    "mrp": re.compile(r"\b(?:mrp|maximum\s+retail\s+price)\b", re.I),
-    "net_quantity": re.compile(r"\bnet[\s.:-]*(?:qty|quantity|wt\.?|weight)\b", re.I),
+    "mrp": re.compile(r"\b(?:m\s*\.?\s*r\s*\.?\s*p\.?|maximum\s+retail\s+price)\b", re.I),
+    "net_quantity": re.compile(r"\b(?:n\s*e\s*t)[\s.:-]*(?:q\s*t\s*y|quantity|w\s*t\.?|weight)\b", re.I),
     "consumer_care": re.compile(r"\b(?:consumer\s*(?:care|complaint)|customer\s*care|feedback\s+contact)\b", re.I),
     "country_of_origin": re.compile(r"\b(?:country\s+of\s+origin|made\s+in|product\s+of)\b", re.I),
-    "manufacture_pack_import_date": re.compile(r"\b(?:mfg|mfd|date\s+of\s+manufacture|manufactur(?:ed|ing)\s+(?:date|on)|packed\s+(?:date|on)|pkd|imported\s+on)\b", re.I),
+    "manufacture_pack_import_date": re.compile(r"\b(?:m\s*f\s*g|m\s*f\s*d|date\s+of\s+manufacture|manufactur(?:ed|ing)\s+(?:date|on)|pack(?:ed|ing)\s+(?:date|on)|p\s*(?:c\s*)?k\s*d|imported\s+on)\b", re.I),
     "best_before_or_use_by": re.compile(r"\b(?:best\s*before|use\s*by(?:\s+date)?|exp(?:iry|ires?)?)\b", re.I),
-    "unit_sale_price": re.compile(r"\b(?:unit\s*sale\s*price|price\s*per)\b", re.I),
+    "unit_sale_price": re.compile(r"\b(?:u\s*s\s*p|unit\s*sale\s*price|price\s*per)\b", re.I),
     "responsible_party_name": re.compile(r"\b(?:manufactured|marketed|packed|imported)\s+by\b", re.I),
-    "batch_number": re.compile(r"\b(?:batch|lot)\s*(?:no\.?|number|#)?\b", re.I),
+    "batch_number": re.compile(r"\b(?:batch|lot|b\s*\.?\s*no)\s*(?:no\.?|number|#)?\b", re.I),
     "fssai_license": re.compile(r"\b(?:fssai|[il1]?ssai)\s*(?:lic(?:ence)?\.?\s*)?(?:no\.?|number)?\b", re.I),
     "commodity_name": re.compile(r"\b(?:product\s+category|common\s+(?:or\s+generic\s+)?name|generic\s+name|name\s+of\s+commodity)\b", re.I),
 }
@@ -22,7 +22,7 @@ EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 URL = re.compile(r"(?:\bhttps?://|\bwww\.|\b[a-z0-9][a-z0-9-]*\.(?:com|in|org|net|co\.in)\b)", re.I)
 PHONE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9](?:[\s-]?\d){9}(?!\d)")
 QUANTITY = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|gms?|gm|grams?|kgs?|kg|ml|mL|litres?|liters?|ltr|lt|l|ℓ|cm|metres?|meters?|m|nos?\.?|units?|pieces?|pcs?|pairs?)\b", re.I)
-PRICE = re.compile(r"(?:₹|rs\.?|inr)?\s*(\d+(?:[.,]\d{1,2})?)(?:\s*/-)?(?![A-Za-z0-9])", re.I)
+PRICE = re.compile(r"(?:₹|r\s*s\.?|inr)?\s*(\d+(?:[.,]\d{1,2})?)(?:\s*/-)?(?![A-Za-z0-9])", re.I)
 DATE = re.compile(r"\b(?:[0-3]?\d[./-][01]?\d[./-]\d{2,4}|(?:0?[1-9]|1[0-2])[./-]\d{2,4}|(?:[0-3]?\d[\s./-]+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s./-]+\d{2,4})\b", re.I)
 DURATION = re.compile(r"\b\d+\s*(?:days?|weeks?|months?|years?)\s*(?:from|after)\s*(?:packing|packaging|manufacture|mfg)\b", re.I)
 BATCH = re.compile(r"\b[A-Z0-9][A-Z0-9/-]{3,}\b", re.I)
@@ -32,7 +32,7 @@ COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|i
 ADDRESS_HINT = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|india|pincode|pin|gujarat|maharashtra|delhi|mumbai|kolkata|chennai|bengaluru|bangalore|plot|sector|chamber|village|taluka)\b", re.I)
 NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?)\b", re.I)
 GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website)\b", re.I)
-PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
+PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
 
 
 def _center(line: dict[str, Any]) -> tuple[float, float]:
@@ -84,6 +84,7 @@ def _valid_product_text(text: str) -> bool:
         and not NUTRITION.search(compact)
         and not re.search(r"\b\d{6}\b", compact)
         and len(compact.split()) <= 6
+        and not (len(compact.split()) >= 5 and len(re.findall(r"\b(?:and|or|the|this|that|is|are|true|name|other)\b", compact, re.I)) >= 2)
     )
 
 
@@ -280,7 +281,11 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             width = box[2] - box[0]
             heights = [max(1, (line.get("bbox") or [0, 0, 0, 0])[3] - (line.get("bbox") or [0, 0, 0, 0])[1]) for line in image_lines]
             median_height = sorted(heights)[len(heights) // 2] if heights else 1
-            if _valid_product_text(text) and height >= max(24, median_height * 1.25):
+            # A front panel often contains only a handful of large display lines;
+            # using its own large median as a 1.25x threshold discarded every
+            # valid name (for example, CHOCOLATE / Desire on two adjacent lines).
+            prominence_ratio = .85 if len(image_lines) <= 8 else 1.25
+            if _valid_product_text(text) and height >= max(24, median_height * prominence_ratio):
                 # Display names tend to be large, wide text on a front panel.
                 # Confidence breaks ties, but cannot make a URL or identifier a name.
                 display.append((height * 2.2 + min(width, 900) * .03 + item["confidence"] * 20, item))

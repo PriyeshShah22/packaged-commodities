@@ -1,10 +1,24 @@
 const KEY = 'packmetrix_reports_v2';
 const BULK_KEY = 'packmetrix_bulk_batches_v1';
 
+export function verificationState(report) {
+  const applicable = (report.results || []).filter((item) => item.outcome !== 'NOT_APPLICABLE');
+  const resolved = applicable.map((item) => item.resolvedOutcome || item.outcome);
+  const counts = {
+    PASS: resolved.filter((outcome) => ['PASS', 'COMPLIANT'].includes(outcome)).length,
+    FAIL: resolved.filter((outcome) => ['FAIL', 'VIOLATION'].includes(outcome)).length,
+    REVIEW: resolved.filter((outcome) => ['REVIEW', 'MORE_EVIDENCE'].includes(outcome)).length,
+    NOT_APPLICABLE: Number(report.counts?.NOT_APPLICABLE || 0),
+  };
+  const total = applicable.length; const verified = counts.PASS + counts.FAIL; const percentage = total ? Math.round(verified / total * 100) : 0;
+  const status = counts.FAIL ? 'NON_COMPLIANT' : counts.REVIEW ? 'REVIEW' : 'COMPLIANT';
+  return { counts, total, verified, percentage, status };
+}
+
 function withScore(report) {
-  const numeric = Number(report.verificationScore ?? report.score ?? 0);
-  const score = Number.isFinite(numeric) ? numeric : 0;
-  return { workflowStatus: 'OPEN', archived: false, ...report, verificationScore: score, score };
+  const verification = verificationState(report); const hasResults = Array.isArray(report.results) && report.results.length > 0;
+  const numeric = Number(report.verificationScore ?? report.score ?? 0); const legacyScore = Number.isFinite(numeric) ? numeric : 0;
+  return { workflowStatus: 'OPEN', archived: false, ...report, aiStatus: report.aiStatus || report.status, aiCounts: report.aiCounts || report.counts, status: hasResults ? verification.status : report.status, counts: hasResults ? verification.counts : report.counts, verification: hasResults ? verification : report.verification, verificationScore: hasResults ? verification.percentage : legacyScore, score: hasResults ? verification.percentage : legacyScore };
 }
 
 export function getReports() {

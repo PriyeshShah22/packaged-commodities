@@ -7,7 +7,7 @@ from app.reports import build_bulk_report_pdf, build_report_pdf
 
 def test_officer_pdf_is_structured_and_excludes_raw_transcript():
     report = {
-        "id": "PMX-TEST-P1", "date": "31/08/2026, 10:30 am", "inspectorName": "Insp. Ramesh Sharma",
+        "id": "PMX-TEST-P1", "inspectionId": "INS-TEST", "batchId": "BULK-TEST", "date": "31/08/2026, 10:30 am", "inspectorName": "Insp. Ramesh Sharma", "ruleSetAsOf": "2026-08-01",
         "status": "REVIEW", "workflowStatus": "OPEN", "verificationScore": 56,
         "counts": {"PASS": 5, "FAIL": 0, "REVIEW": 4},
         "details": {"productName": "Chocolate Desire", "productId": "8906082371231"},
@@ -19,6 +19,9 @@ def test_officer_pdf_is_structured_and_excludes_raw_transcript():
     text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(payload)).pages)
     assert "Chocolate Desire" in text
     assert "EVIDENCE VERIFICATION" in text
+    assert "INS-TEST" in text and "BULK-TEST" in text and "2026-08-01" in text
+    assert "₹220" in text and "■220" not in text
+    assert "AI screening result" in text and "Final officer determination" in text
     assert "Legal reference" in text
     assert "SECRET DEBUG TRANSCRIPT LINE" not in text
 

@@ -1,4 +1,5 @@
 from app.ocr.extractor import extract_declarations
+from app.api import _grouping_tokens, _token_similarity
 from app.ocr.dot_matrix import _date, _normalize
 
 
@@ -150,3 +151,35 @@ def test_mrp_prefers_retail_amount_over_dot_matrix_unit_price_candidate():
         line("23.00 (₹0.23/g)", y=35),
     ])
     assert fields["mrp"]["value"] == "MRP ₹23.00 inclusive of all taxes"
+
+def test_grouping_uses_brand_domain_as_hint_without_turning_it_into_product_name():
+    front = _grouping_tokens([{"text": "CREAM POT CHOCOLATE DESIRE", "confidence": .98}], {})
+    back = _grouping_tokens([{"text": "www.creampot.in", "confidence": .99}], {})
+    assert _token_similarity(front, back) >= .2
+    assert "www.creampot.in" not in front | back
+
+
+def test_unusual_spaced_stamped_price_date_batch_and_quantity_formats():
+    fields = extract_declarations([
+        line("M R P Rs. 369.00", y=10),
+        line("U S P ₹0.74 per g", y=35),
+        line("P K D FEB-2026", y=60),
+        line("USE BY AUG-2026", y=85),
+        line("B. No A7-26/X", y=110),
+        line("N E T W T 500 GMS", y=135),
+    ])
+    assert fields["mrp"]["value"] == "MRP ₹369.00"
+    assert fields["mrp"]["raw_text"] == "M R P Rs. 369.00"
+    assert fields["unit_sale_price"]["value"] == "₹0.74 per g"
+    assert fields["manufacture_pack_import_date"]["value"] == "02/2026"
+    assert fields["best_before_or_use_by"]["value"] == "08/2026"
+    assert fields["batch_number"]["value"] == "A7-26/X"
+    assert fields["net_quantity"]["value"] == "500 g"
+
+
+def test_random_ocr_sentence_is_not_promoted_to_product_name():
+    fields = extract_declarations([
+        {**line("Tis O Ram Tmakorfancy Name Andoes Otrerent Ts True Natue", confidence=.96), "bbox": [5, 5, 900, 90]},
+        line("FSSAI Lic. No. 10016051001876", y=100),
+    ])
+    assert "product_name" not in fields

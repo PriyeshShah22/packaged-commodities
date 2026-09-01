@@ -1,4 +1,7 @@
-from threading import local
+import hashlib
+from collections import OrderedDict
+from copy import deepcopy
+from threading import Lock, local
 from typing import Any
 
 import cv2
@@ -9,6 +12,9 @@ from app.ocr.dot_matrix import extract_dot_matrix_lines
 
 
 _engine_state = local()
+_ocr_cache: OrderedDict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = OrderedDict()
+_ocr_cache_lock = Lock()
+_OCR_CACHE_LIMIT = 64
 LEGAL_SIGNAL = ("net", "mrp", "mfg", "mfd", "batch", "fssai", "consumer", "manufactured", "marketed", "use by", "exp")
 
 
@@ -44,6 +50,17 @@ def _needs_enhanced_pass(result) -> bool:
 
 
 def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    digest = hashlib.sha256(image_bytes).hexdigest()
+    with _ocr_cache_lock:
+        cached = _ocr_cache.get(digest)
+        if cached:
+            _ocr_cache.move_to_end(digest)
+            cached_lines, cached_quality = deepcopy(cached)
+            for line in cached_lines:
+                line["image_id"] = image_id
+            cached_quality["ocr_cache_hit"] = True
+            return cached_lines, cached_quality
+
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     image = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if image is None:
@@ -121,4 +138,10 @@ def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], di
         })
     lines.extend(dot_matrix_lines)
     quality["dot_matrix_fields_detected"] = len(dot_matrix_lines)
+    quality["ocr_cache_hit"] = False
+    with _ocr_cache_lock:
+        _ocr_cache[digest] = deepcopy((lines, quality))
+        _ocr_cache.move_to_end(digest)
+        while len(_ocr_cache) > _OCR_CACHE_LIMIT:
+            _ocr_cache.popitem(last=False)
     return lines, quality
