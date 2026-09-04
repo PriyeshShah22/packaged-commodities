@@ -2,8 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
   CameraOff,
-  CheckCircle2,
-  CircleDashed,
   Loader2,
   ScanLine,
   Zap
@@ -15,7 +13,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   const streamRef = useRef(null);
   const intervalRef = useRef(null);
   const busyRef = useRef(busy);
-  const lastFrameRef = useRef(null);
+  const onCaptureRef = useRef(onCapture);
+  const previousSampleRef = useRef(null);
+  const lastAcceptedFrameRef = useRef(null);
+  const captureInFlightRef = useRef(false);
 
   const [active, setActive] = useState(false);
   const [continuous, setContinuous] = useState(false);
@@ -35,6 +36,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+
+  useEffect(() => {
+    onCaptureRef.current = onCapture;
+  }, [onCapture]);
 
   const start = async () => {
     setError('');
@@ -69,13 +74,14 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   };
 
   const capture = async (automatic = false) => {
-    if (!videoRef.current?.videoWidth || busyRef.current) return;
+    if (!videoRef.current?.videoWidth || busyRef.current || captureInFlightRef.current) return;
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const scale = Math.min(1, 1800 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
     const context = canvas.getContext('2d');
-    context.drawImage(video, 0, 0);
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     if (automatic) {
       const sample = document.createElement('canvas');
@@ -92,17 +98,30 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
       for (let i = 1; i < signature.length; i += 1) {
         edges += Math.abs(signature[i] - signature[i - 1]);
       }
-      const previous = lastFrameRef.current;
-      const difference = previous
+      const previous = previousSampleRef.current;
+      const motion = previous
         ? signature.reduce((sum, value, index) => sum + Math.abs(value - previous[index]), 0) / signature.length
         : 99;
-      if (edges / signature.length < 6 || difference < 5) return;
-      lastFrameRef.current = signature;
+      previousSampleRef.current = signature;
+      const accepted = lastAcceptedFrameRef.current;
+      const novelty = accepted
+        ? signature.reduce((sum, value, index) => sum + Math.abs(value - accepted[index]), 0) / signature.length
+        : 99;
+      // Wait for a steady, detailed frame and ignore a side that was already
+      // processed. Rotation produces a novel signature and is accepted once it
+      // settles, so declarations accumulate without OCR on every video frame.
+      if (edges / signature.length < 6 || motion > 10 || novelty < 5) return;
+      lastAcceptedFrameRef.current = signature;
     }
 
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
-    if (blob) {
-      await onCapture(new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' }), automatic);
+    captureInFlightRef.current = true;
+    try {
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+      if (blob) {
+        await onCaptureRef.current(new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' }), automatic);
+      }
+    } finally {
+      captureInFlightRef.current = false;
     }
   };
 
@@ -114,11 +133,11 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     } else {
       setContinuous(true);
       capture(true);
-      intervalRef.current = setInterval(() => capture(true), 2500);
+      intervalRef.current = setInterval(() => capture(true), 1800);
     }
   };
 
-  const progress = [
+  const extractedFields = [
     ['Product', ['product_name', 'commodity_name']],
     ['Manufacturer', ['responsible_party_name']],
     ['Net quantity', ['net_quantity']],
@@ -132,9 +151,9 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   ].map(([label, fields]) => ({
     label,
     evidence: fields.map((field) => ocrData?.fields?.[field]).find(Boolean),
-  }));
+  })).filter((item) => item.evidence);
 
-  const detectedCount = progress.filter((p) => Boolean(p.evidence)).length;
+  const detectedCount = extractedFields.length;
 
   return (
     <div className="grid lg:grid-cols-2 gap-4 items-stretch">
@@ -192,11 +211,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
                   {continuous ? 'LIVE OCR • STREAMING SENSOR' : 'LIVE CAMERA FEED'}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono text-slate-300 bg-slate-900/80 border border-slate-700/60 px-2 py-0.5 rounded-md backdrop-blur-xs">
-                  {detectedCount}/10 DECLARATIONS
-                </span>
-              </div>
+              <span className="text-[10px] font-mono text-slate-300 bg-slate-900/80 border border-slate-700/60 px-2 py-0.5 rounded-md backdrop-blur-xs">STRUCTURED EXTRACTION</span>
             </div>
 
             {/* Central Inspection Reticle / Target Alignment Guide */}
@@ -276,60 +291,34 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
         )}
       </div>
 
-      {/* RIGHT COLUMN: Real-Time Declaration Progress Dashboard */}
+      {/* RIGHT COLUMN: Actual extracted package information */}
       <div className="rounded-2xl bg-slate-950 border border-slate-800/80 p-5 text-slate-200 flex flex-col justify-between min-h-[460px] sm:min-h-[520px] shadow-lg">
         <div>
-          {/* Header */}
           <div className="flex items-center justify-between pb-3.5 border-b border-slate-800/80">
             <div className="flex items-center gap-2 text-xs font-bold text-sky-400">
               <ScanLine className="w-4 h-4" />
-              <span>LIVE DECLARATION PROGRESS</span>
+              <span>EXTRACTED PACKAGE INFORMATION</span>
               {busy && <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />}
             </div>
-            <span className="text-[11px] font-mono text-slate-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
-              {detectedCount}/10 Verified
-            </span>
+            {detectedCount > 0 && <span className="text-[11px] font-mono text-slate-400">{detectedCount} fields</span>}
           </div>
 
-          {/* 10 Declaration Progress Rows */}
           <div className="mt-3.5 space-y-2 max-h-[420px] overflow-y-auto pr-1">
-            {progress.map(({ label, evidence }) => (
+            {!extractedFields.length && <p className="text-sm text-slate-400 leading-relaxed p-3">Point the camera at a declaration panel and choose Live OCR. Detected package values will appear here as each side is scanned.</p>}
+            {extractedFields.map(({ label, evidence }) => (
               <div
                 key={label}
-                className={`rounded-xl border px-3 py-2 transition-all duration-200 ${
-                  evidence
-                    ? 'border-emerald-500/40 bg-emerald-950/20'
-                    : 'border-slate-800/80 bg-slate-900/50'
-                }`}
+                className="rounded-xl border border-slate-800/80 bg-slate-900/50 px-3 py-2"
               >
-                <div className="flex gap-2 items-center">
-                  {evidence ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  ) : (
-                    <CircleDashed className="w-4 h-4 text-slate-600 shrink-0" />
-                  )}
-                  <span className={`text-xs font-bold ${evidence ? 'text-white' : 'text-slate-400'}`}>
-                    {label} {evidence ? 'detected' : 'not yet detected'}
-                  </span>
-                  {evidence && (
-                    <span className="ml-auto text-[10px] font-mono font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.2 rounded">
-                      {Math.round(evidence.confidence * 100)}%
-                    </span>
-                  )}
-                </div>
-                {evidence && (
-                  <p className="text-xs font-mono text-emerald-200/90 mt-1 ml-6 truncate">
-                    {evidence.value}
-                  </p>
-                )}
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+                <p className="text-sm text-white mt-1 break-words">{evidence.value}</p>
               </div>
             ))}
           </div>
         </div>
 
-        {/* Footer Guidance */}
         <div className="pt-3 border-t border-slate-800/80 mt-3 text-[11px] text-slate-500 flex items-center justify-between">
-          <span>Frame declaration panel and choose Live OCR.</span>
+          <span>Previously extracted values are retained while scanning another side.</span>
           <span className="font-mono text-slate-400">Rule 6 &middot; LM(PC)</span>
         </div>
       </div>

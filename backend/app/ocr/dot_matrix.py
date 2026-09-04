@@ -38,8 +38,12 @@ def _recognize_row(engine: Any, row: np.ndarray) -> tuple[str, float]:
     enlarged = cv2.resize(bordered, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     sharpened = cv2.addWeighted(enlarged, 1.35, cv2.GaussianBlur(enlarged, (0, 0), 1), -0.35, 0)
 
+    # The sharpened crop is the most reliable default for faint stamps. Running
+    # all three variants for every row multiplied a five-row sticker into dozens
+    # of ONNX calls. Only fall back when the first result is genuinely weak.
     best = ("", 0.0)
-    for candidate in (bordered, enlarged, sharpened):
+    candidates = [sharpened]
+    for candidate in candidates:
         result = engine(candidate, use_det=False, use_cls=False, use_rec=True)
         if result.txts is None or result.scores is None or not len(result.txts):
             continue
@@ -52,6 +56,12 @@ def _recognize_row(engine: Any, row: np.ndarray) -> tuple[str, float]:
             best = (text, score)
         if score >= 0.96 and sum(character.isalnum() for character in text) >= 4:
             break
+    if best[1] < 0.62 or sum(character.isalnum() for character in best[0]) < 3:
+        result = engine(bordered, use_det=False, use_cls=False, use_rec=True)
+        if result.txts is not None and result.scores is not None and len(result.txts):
+            text, score = str(result.txts[0]).strip(), float(result.scores[0])
+            if score > best[1]:
+                best = (text, score)
     return best
 
 
@@ -187,7 +197,7 @@ def extract_dot_matrix_lines(image: np.ndarray, result: Any, image_id: str, engi
         base_top = max(0, round(center_y - half_height))
         base_bottom = min(image.shape[0], round(center_y + half_height))
         best = ("", "", 0.0, 0.0, base_top, base_bottom)
-        offsets = range(-2, 3) if field in {"manufacture_pack_import_date", "best_before_or_use_by"} else (0,)
+        offsets = (-1, 0, 1) if field in {"manufacture_pack_import_date", "best_before_or_use_by"} else (0,)
         for offset in offsets:
             top = max(0, base_top + offset)
             bottom = min(image.shape[0], base_bottom + offset)
