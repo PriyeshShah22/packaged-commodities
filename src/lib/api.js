@@ -38,13 +38,25 @@ export async function getBackendHealth() {
   try { return (await fetch(`${API_URL}/health`)).ok; } catch { return false; }
 }
 
-export async function extractImages(files, token) {
+export async function extractImages(files, token, { live = false } = {}) {
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
+  const controller = new AbortController();
+  const timeout = live ? setTimeout(() => controller.abort(), 20000) : null;
+  const started = performance.now();
   let response;
-  try { response = await fetch(`${API_URL}/api/v1/ocr/extract`, { method: 'POST', headers: authHeaders(token), body: formData }); }
-  catch { throw new Error('The OCR service is not reachable. Confirm that the backend on port 8000 is running.'); }
-  return readResponse(response, 'OCR extraction failed for the uploaded images.');
+  try {
+    if (live) console.debug('[Live OCR] request sent');
+    response = await fetch(`${API_URL}/api/v1/ocr/extract${live ? '?live=true' : ''}`, { method: 'POST', headers: authHeaders(token), body: formData, signal: controller.signal });
+    const result = await readResponse(response, 'OCR extraction failed for the uploaded images.');
+    if (live) console.debug('[Live OCR] response received', { elapsedMs: Math.round(performance.now() - started), server: result.timing });
+    return result;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Live OCR timed out. Keep the declaration panel in the guide and try the next clear frame.');
+    throw error instanceof TypeError ? new Error('The OCR service is not reachable. Confirm that the backend on port 8000 is running.') : error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function groupBulkImages(files, token) {

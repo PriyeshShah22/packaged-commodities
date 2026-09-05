@@ -22,10 +22,32 @@ async function imageRecord(file, index, automatic = false) {
   return { id: `IMG-${String(index + 1).padStart(3, '0')}`, file, url, thumbnail, automatic, width: image.width || 0, height: image.height || 0, quality: image.width >= 800 && image.height >= 600 ? 'sufficient' : 'insufficient' };
 }
 
+function evidenceStrength(field, evidence) {
+  if (!evidence?.value) return -1;
+  const value = String(evidence.value); const raw = String(evidence.raw_text || '');
+  const digits = (value.match(/\d/g) || []).length; const words = (value.match(/[A-Za-z]{2,}/g) || []).length;
+  let score = Number(evidence.confidence || 0);
+  if (['mrp', 'unit_sale_price'].includes(field)) score += Math.min(digits, 6) * .025 + (/\d[.,]\d{1,2}\b/.test(raw) ? .05 : 0) + (/(?:₹|\brs\.?\b|\binr\b|\/-)/i.test(raw) ? .03 : 0);
+  else if (field === 'net_quantity') score += Math.min(digits, 7) * .03;
+  else if (['consumer_phone', 'fssai_license', 'barcode'].includes(field)) score += Math.min(digits, 14) * .012;
+  else if (['manufacture_pack_import_date', 'best_before_or_use_by', 'batch_number'].includes(field)) score += Math.min(value.replace(/\s/g, '').length, 14) * .008;
+  else if (['product_name', 'commodity_name', 'responsible_party_name', 'responsible_party_address'].includes(field)) score += Math.min(words, 7) * .018 + Math.min(value.length, 70) * .001;
+  return score;
+}
+
+function shouldReplaceEvidence(field, previous, incoming) {
+  if (!previous?.value) return Boolean(incoming?.value);
+  if (!incoming?.value) return false;
+  const oldKey = String(previous.value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const newKey = String(incoming.value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (oldKey && newKey && oldKey !== newKey && oldKey.includes(newKey) && Number(incoming.confidence || 0) < Number(previous.confidence || 0) + .15) return false;
+  return evidenceStrength(field, incoming) > evidenceStrength(field, previous) + .01;
+}
+
 function mergedOcr(current, incoming) {
   if (!current) return incoming;
   const fields = { ...(current.fields || {}) };
-  Object.entries(incoming.fields || {}).forEach(([field, evidence]) => { if (!fields[field] || evidence.confidence >= fields[field].confidence) fields[field] = evidence; });
+  Object.entries(incoming.fields || {}).forEach(([field, evidence]) => { if (shouldReplaceEvidence(field, fields[field], evidence)) fields[field] = evidence; });
   return { ...incoming, images: [...(current.images || []), ...(incoming.images || [])].slice(-12), total_lines: (current.total_lines || 0) + (incoming.total_lines || 0), fields };
 }
 
@@ -50,23 +72,27 @@ export default function NewInspectionRoute() {
   const addProduct = () => { const product = newProduct(products.length + 1); setProducts((current) => [...current, product]); setActiveKey(product.key); };
   const removeProduct = (key) => { if (products.length === 1) return; products.find((p) => p.key === key)?.images.forEach((image) => URL.revokeObjectURL(image.url)); const next = products.filter((p) => p.key !== key); setProducts(next); if (activeKey === key) setActiveKey(next[0].key); };
 
-  const runOcr = async (key, files, append = false) => {
-    if (!files.length) return; update(key, { ocrLoading: true, ocrError: '' });
+  const runOcr = async (key, files, append = false, live = false) => {
+    if (!files.length) return false; update(key, { ocrLoading: true, ocrError: '' });
     try {
-      const data = await extractImages(files, token); const tooBlurry = data.images?.some((image) => image.quality?.blur_status === 'high');
+      const data = await extractImages(files, token, { live }); const tooBlurry = data.images?.some((image) => image.quality?.blur_status === 'high');
       update(key, (product) => {
         const ocrData = append ? mergedOcr(product.ocrData, data) : data;
         if (tooBlurry) return { ocrData, ocrError: 'Frame too blurred to update fields. Hold the package steady, fill the guide, and scan again.' };
         const declarations = { ...product.declarations };
-        Object.entries(data.fields || {}).forEach(([field, evidence]) => { const previous = product.ocrData?.fields?.[field]; if (field in declarations && evidence?.value && (!append || !previous || evidence.confidence >= previous.confidence)) declarations[field] = evidence.value; });
-        const detectedName = data.fields?.product_name?.value || data.fields?.commodity_name?.value;
-        return { ocrData, declarations, details: { ...product.details, productId: product.details.productId || data.fields?.barcode?.value || '', productName: product.details.productName || detectedName || '' }, context: data.fields?.country_of_origin?.value && !/india/i.test(data.fields.country_of_origin.value) ? { ...product.context, origin: 'imported' } : product.context, ocrError: '' };
+        Object.entries(data.fields || {}).forEach(([field, evidence]) => { const previous = product.ocrData?.fields?.[field]; if (field in declarations && evidence?.value && (!append || shouldReplaceEvidence(field, previous, evidence))) declarations[field] = evidence.value; });
+        const previousDetectedName = product.ocrData?.fields?.product_name?.value || product.ocrData?.fields?.commodity_name?.value || '';
+        const detectedName = ocrData.fields?.product_name?.value || ocrData.fields?.commodity_name?.value || '';
+        const productName = !product.details.productName || product.details.productName === previousDetectedName ? detectedName : product.details.productName;
+        return { ocrData, declarations, details: { ...product.details, productId: product.details.productId || ocrData.fields?.barcode?.value || '', productName }, context: data.fields?.country_of_origin?.value && !/india/i.test(data.fields.country_of_origin.value) ? { ...product.context, origin: 'imported' } : product.context, ocrError: '' };
       });
-    } catch (error) { update(key, { ocrError: error.message }); } finally { update(key, { ocrLoading: false }); }
+      requestAnimationFrame(() => console.debug('[Live OCR] UI updated', { fields: Object.keys(data.fields || {}).length }));
+      return true;
+    } catch (error) { update(key, { ocrError: error.message }); return false; } finally { update(key, { ocrLoading: false }); }
   };
 
   const addImages = async (event) => { const files = Array.from(event.target.files || []).slice(0, 12 - active.images.length); const records = await Promise.all(files.map((file, index) => imageRecord(file, active.images.length + index))); const next = [...active.images, ...records]; update(active.key, { images: next }); event.target.value = ''; await runOcr(active.key, files, active.images.length > 0); };
-  const cameraCapture = async (file, automatic) => { const record = await imageRecord(file, active.images.length, automatic); const stable = automatic ? active.images.filter((item) => !item.automatic) : active.images; const next = [...stable, record].slice(-12).map((item, index) => ({ ...item, id: `IMG-${String(index + 1).padStart(3, '0')}` })); update(active.key, { images: next }); await runOcr(active.key, [file], true); };
+  const cameraCapture = async (file, automatic) => { const record = await imageRecord(file, active.images.length, automatic); const stable = automatic ? active.images.filter((item) => !item.automatic) : active.images; const next = [...stable, record].slice(-12).map((item, index) => ({ ...item, id: `IMG-${String(index + 1).padStart(3, '0')}` })); update(active.key, { images: next }); return runOcr(active.key, [file], true, automatic); };
   const removeImage = (id) => { const removed = active.images.find((image) => image.id === id); if (removed) URL.revokeObjectURL(removed.url); const images = active.images.filter((image) => image.id !== id).map((image, index) => ({ ...image, id: `IMG-${String(index + 1).padStart(3, '0')}` })); update(active.key, { images, ...(images.length ? {} : { ocrData: null, declarations: { ...EMPTY } }) }); };
 
   const analyze = async () => {

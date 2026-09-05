@@ -31,7 +31,7 @@ BARCODE = re.compile(r"\b\d{8,14}\b")
 COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|industries|enterprises|llp)\b", re.I)
 ADDRESS_HINT = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|india|pincode|pin|gujarat|maharashtra|delhi|mumbai|kolkata|chennai|bengaluru|bangalore|plot|sector|chamber|village|taluka)\b", re.I)
 NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?)\b", re.I)
-GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website)\b", re.I)
+GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website|incl(?:usive)?|tax(?:es)?)\b", re.I)
 PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
 
 
@@ -64,6 +64,33 @@ def _dedupe_rank(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if key and (key not in unique or item["confidence"] > unique[key]["confidence"]):
             unique[key] = item
     return sorted(unique.values(), key=lambda item: (item["confidence"], -len(item["value"])), reverse=True)
+
+
+def _evidence_strength(field: str, item: dict[str, Any]) -> float:
+    """Rank semantic completeness as well as OCR certainty.
+
+    Camera OCR is often extremely confident about a clipped fragment.  Confidence
+    alone must therefore not let a single digit/word beat a complete declaration.
+    """
+    value = str(item.get("value", ""))
+    raw = str(item.get("raw_text", ""))
+    confidence = float(item.get("confidence", 0))
+    digits = len(re.findall(r"\d", value))
+    words = len(re.findall(r"[A-Za-z]{2,}", value))
+    score = confidence
+    if field in {"mrp", "unit_sale_price"}:
+        score += min(digits, 6) * .025
+        score += .05 if re.search(r"\d[.,]\d{1,2}\b", raw) else 0
+        score += .03 if re.search(r"₹|\brs\.?\b|\binr\b|/-", raw, re.I) else 0
+    elif field == "net_quantity":
+        score += min(digits, 7) * .03
+    elif field in {"consumer_phone", "fssai_license", "barcode"}:
+        score += min(digits, 14) * .012
+    elif field in {"manufacture_pack_import_date", "best_before_or_use_by", "batch_number"}:
+        score += min(len(re.sub(r"\s", "", value)), 14) * .008
+    elif field in {"product_name", "commodity_name", "responsible_party_name", "responsible_party_address"}:
+        score += min(words, 7) * .018 + min(len(value), 70) * .001
+    return score
 
 
 def _valid_product_text(text: str) -> bool:
@@ -159,30 +186,48 @@ def _extract_labeled(
         if not ANCHORS[field].search(anchor["text"]):
             continue
         neighbors = _near(anchor, image_lines)
-        _, anchor_y = _center(anchor)
+        anchor_x, anchor_y = _center(anchor)
         anchor_height = max(20, anchor["bbox"][3] - anchor["bbox"][1])
+        anchor_width = max(40, anchor["bbox"][2] - anchor["bbox"][0])
         same_row = [
             item for item in neighbors
             if item is not anchor
-            and abs(_center(item)[1] - anchor_y) <= max(12, anchor_height * .6)
+            and abs(_center(item)[1] - anchor_y) <= max(24, anchor_height * 1.1)
             and (
                 item.get("source_type") != "dot_matrix_ocr"
                 or ANCHORS[field].search(item["text"])
             )
         ]
-        # A field value must either share the OCR line or be spatially on the
-        # same printed row. This prevents nutrition values elsewhere on the
-        # label from leaking into net quantity, MRP, date, or batch fields.
-        variants = [anchor["text"]] + [item["text"] for item in same_row]
-        combined = " ".join(variants)
-        extracted = [extractor(anchor["text"]), extractor(combined)]
-        values = [value for value in dict.fromkeys(extracted) if value]
-        if field == "mrp" and values:
-            value = max(values, key=lambda candidate: (float(re.search(r"\d+(?:\.\d+)?", candidate).group(0)) >= 1, bool(re.search(r"\.\d{2}\b", candidate))))
+        # Camera OCR often splits a printed declaration into adjacent boxes or
+        # a label/value pair on consecutive baselines. Evaluate the complete OCR
+        # result first, then map only spatially close, compatible text. Excluding
+        # competing labels prevents a nearby Use By value becoming the Mfg date.
+        adjacent = []
+        for item in neighbors:
+            if item is anchor or item in same_row or NUTRITION.search(item["text"]):
+                continue
+            item_x, item_y = _center(item)
+            other_anchor = any(pattern.search(item["text"]) for name, pattern in ANCHORS.items() if name != field)
+            if other_anchor:
+                continue
+            close_vertical = -anchor_height * .5 <= item_y - anchor_y <= max(55, anchor_height * 2.2)
+            close_horizontal = abs(item_x - anchor_x) <= max(320, anchor_width * 1.8)
+            if close_vertical and close_horizontal:
+                adjacent.append(item)
+
+        variants = [(anchor["text"], [anchor])]
+        variants.extend((f'{anchor["text"]} {item["text"]}', [anchor, item]) for item in same_row + adjacent)
+        if same_row:
+            variants.append((" ".join([anchor["text"], *(item["text"] for item in same_row[:3])]), [anchor, *same_row[:3]]))
+        extracted = [(extractor(text), used) for text, used in variants]
+        extracted = [(value, used) for value, used in extracted if value]
+        if field == "mrp" and extracted:
+            value, used = max(extracted, key=lambda candidate: (float(re.search(r"\d+(?:\.\d+)?", candidate[0]).group(0)) >= 1, bool(re.search(r"\.\d{2}\b", candidate[0])), -len(candidate[1])))
+        elif extracted:
+            value, used = extracted[0]
         else:
-            value = values[0] if values else ""
+            value, used = "", []
         if value:
-            used = [anchor] + same_row[:3]
             found.append(_candidate(field, value, used, penalty))
     return found
 
@@ -302,13 +347,16 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             parts = [best] + ([companion] if companion else [])
             parts.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
             value = " ".join(_clean_product_text(item["text"]) for item in parts)
-            candidates["product_name"].append(_candidate("product_name", value.title(), parts, .05))
+            # A lone prominent word is normally brand evidence, not sufficient
+            # evidence of the full product identity. Keep it separate so a later
+            # camera angle cannot replace a complete product name with one word.
+            if companion or len(value.split()) >= 2:
+                candidates["product_name"].append(_candidate("product_name", value.title(), parts, .05))
 
     fields: dict[str, dict[str, Any]] = {}
     for field, items in candidates.items():
         ranked = _dedupe_rank(items)
-        if field == "mrp":
-            ranked.sort(key=lambda item: (item["confidence"] + (.12 if re.search(r"₹\d+\.\d{2}\b", item["value"]) else 0) + (.03 if "inclusive of all taxes" in item["value"].lower() else 0)), reverse=True)
         if ranked:
+            ranked.sort(key=lambda item: _evidence_strength(field, item), reverse=True)
             fields[field] = {**ranked[0], "alternatives": ranked[1:4]}
     return fields

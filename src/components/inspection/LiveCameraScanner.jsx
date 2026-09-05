@@ -15,8 +15,9 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   const busyRef = useRef(busy);
   const onCaptureRef = useRef(onCapture);
   const previousSampleRef = useRef(null);
-  const lastAcceptedFrameRef = useRef(null);
+  const acceptedFramesRef = useRef([]);
   const captureInFlightRef = useRef(false);
+  const candidateSinceRef = useRef(0);
 
   const [active, setActive] = useState(false);
   const [continuous, setContinuous] = useState(false);
@@ -76,24 +77,34 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   const capture = async (automatic = false) => {
     if (!videoRef.current?.videoWidth || busyRef.current || captureInFlightRef.current) return;
     const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const scale = Math.min(1, 1800 / Math.max(video.videoWidth, video.videoHeight));
-    canvas.width = Math.round(video.videoWidth * scale);
-    canvas.height = Math.round(video.videoHeight * scale);
-    const context = canvas.getContext('2d');
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    let acceptedCandidate = null;
 
     if (automatic) {
       const sample = document.createElement('canvas');
       sample.width = 48;
       sample.height = 27;
       const sampleContext = sample.getContext('2d', { willReadFrequently: true });
-      sampleContext.drawImage(video, 0, 0, 48, 27);
+      // Judge the declaration guide rather than the whole camera view. Faces,
+      // hands and background edges previously made a blurred label look usable.
+      sampleContext.drawImage(
+        video,
+        video.videoWidth * .18,
+        video.videoHeight * .16,
+        video.videoWidth * .64,
+        video.videoHeight * .68,
+        0,
+        0,
+        48,
+        27,
+      );
       const pixels = sampleContext.getImageData(0, 0, 48, 27).data;
       const signature = [];
       let edges = 0;
+      let clipped = 0;
       for (let i = 0; i < pixels.length; i += 16) {
-        signature.push((pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3);
+        const luminance = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+        signature.push(luminance);
+        if (luminance < 18 || luminance > 242) clipped += 1;
       }
       for (let i = 1; i < signature.length; i += 1) {
         edges += Math.abs(signature[i] - signature[i - 1]);
@@ -103,22 +114,58 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
         ? signature.reduce((sum, value, index) => sum + Math.abs(value - previous[index]), 0) / signature.length
         : 99;
       previousSampleRef.current = signature;
-      const accepted = lastAcceptedFrameRef.current;
-      const novelty = accepted
-        ? signature.reduce((sum, value, index) => sum + Math.abs(value - accepted[index]), 0) / signature.length
-        : 99;
+      const now = performance.now();
+      if (!candidateSinceRef.current || motion > 24) candidateSinceRef.current = now;
+      const candidateAge = now - candidateSinceRef.current;
+      const detail = edges / signature.length;
+      const clippedRatio = clipped / signature.length;
+      const matches = acceptedFramesRef.current.map((accepted) => ({
+        accepted,
+        difference: signature.reduce((sum, value, index) => sum + Math.abs(value - accepted.signature[index]), 0) / signature.length,
+      }));
+      const closest = matches.sort((a, b) => a.difference - b.difference)[0];
       // Wait for a steady, detailed frame and ignore a side that was already
       // processed. Rotation produces a novel signature and is accepted once it
       // settles, so declarations accumulate without OCR on every video frame.
-      if (edges / signature.length < 6 || motion > 10 || novelty < 5) return;
-      lastAcceptedFrameRef.current = signature;
+      const stable = motion <= 12;
+      const steadyHandFallback = candidateAge >= 1200 && motion <= 20 && detail >= 8;
+      if (detail < 5.5 || clippedRatio > .55 || (!stable && !steadyHandFallback)) return;
+      // A matching side is accepted again only if its image detail improved
+      // materially; otherwise it would repeat the same expensive OCR request.
+      if (closest?.difference < 5 && detail < closest.accepted.detail * 1.18) return;
+      acceptedCandidate = { signature, detail };
+      candidateSinceRef.current = now;
+      console.debug('[Live OCR] frame selected', { detail: detail.toFixed(2), motion: motion.toFixed(2), clippedRatio: clippedRatio.toFixed(2) });
     }
+
+    // Only render/encode the high-resolution crop after the cheap sample has
+    // passed. Previously this work ran on every rejected sample.
+    const canvas = canvasRef.current;
+    const source = automatic
+      ? { x: video.videoWidth * .12, y: video.videoHeight * .10, width: video.videoWidth * .76, height: video.videoHeight * .80 }
+      : { x: 0, y: 0, width: video.videoWidth, height: video.videoHeight };
+    const maxDimension = automatic ? 1400 : 1800;
+    const scale = Math.min(1, maxDimension / Math.max(source.width, source.height));
+    canvas.width = Math.round(source.width * scale);
+    canvas.height = Math.round(source.height * scale);
+    const context = canvas.getContext('2d');
+    context.drawImage(video, source.x, source.y, source.width, source.height, 0, 0, canvas.width, canvas.height);
 
     captureInFlightRef.current = true;
     try {
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
       if (blob) {
-        await onCaptureRef.current(new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' }), automatic);
+        console.debug('[Live OCR] image captured', { bytes: blob.size, width: canvas.width, height: canvas.height });
+        const succeeded = await onCaptureRef.current(new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' }), automatic);
+        if (automatic && succeeded !== false && acceptedCandidate) {
+          acceptedFramesRef.current = [
+            ...acceptedFramesRef.current.filter((accepted) => {
+              const difference = acceptedCandidate.signature.reduce((sum, value, index) => sum + Math.abs(value - accepted.signature[index]), 0) / acceptedCandidate.signature.length;
+              return difference >= 5;
+            }),
+            acceptedCandidate,
+          ].slice(-6);
+        }
       }
     } finally {
       captureInFlightRef.current = false;
@@ -132,8 +179,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
       setContinuous(false);
     } else {
       setContinuous(true);
+      previousSampleRef.current = null;
+      candidateSinceRef.current = performance.now();
       capture(true);
-      intervalRef.current = setInterval(() => capture(true), 1800);
+      intervalRef.current = setInterval(() => capture(true), 300);
     }
   };
 

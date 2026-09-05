@@ -2,6 +2,7 @@ import hashlib
 from collections import OrderedDict
 from copy import deepcopy
 from threading import Lock, local
+from time import perf_counter
 from typing import Any
 
 import cv2
@@ -49,24 +50,35 @@ def _needs_enhanced_pass(result) -> bool:
     return average < 0.72
 
 
-def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    started = perf_counter()
     digest = hashlib.sha256(image_bytes).hexdigest()
+    cache_key = f"{'live' if live else 'full'}:{digest}"
     with _ocr_cache_lock:
-        cached = _ocr_cache.get(digest)
+        cached = _ocr_cache.get(cache_key)
         if cached:
-            _ocr_cache.move_to_end(digest)
+            _ocr_cache.move_to_end(cache_key)
             cached_lines, cached_quality = deepcopy(cached)
             for line in cached_lines:
                 line["image_id"] = image_id
             cached_quality["ocr_cache_hit"] = True
+            cached_quality["timing_ms"] = {"total": round((perf_counter() - started) * 1000, 1), "cache": True}
             return cached_lines, cached_quality
 
+    decode_started = perf_counter()
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     image = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("The uploaded file could not be decoded as an image.")
 
     height, width = image.shape[:2]
+    # Live capture is progressive: use a bounded, high-enough resolution for the
+    # first response instead of making an inspector wait for every expensive
+    # evidence enhancement. Uploaded evidence continues through the full path.
+    if live and max(height, width) > 1600:
+        scale = 1600 / max(height, width)
+        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blur_variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     quality = {
@@ -75,15 +87,28 @@ def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], di
         "blur_variance": round(blur_variance, 2),
         "resolution_sufficient": width >= 800 and height >= 600,
         "blur_status": "low" if blur_variance >= 100 else "moderate" if blur_variance >= 45 else "high",
+        "timing_ms": {"decode_and_quality": round((perf_counter() - decode_started) * 1000, 1)},
     }
 
+    # Camera panels are frequently held sideways while the device remains in
+    # portrait orientation. Try that likely orientation first in live mode. If
+    # it is wrong, the box-orientation check below falls back to the untouched
+    # frame and compares recognition quality before accepting it.
+    original_orientation = image
+    pre_rotated_live = live and image.shape[0] > image.shape[1] * 1.35
+    if pre_rotated_live:
+        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
     engine = get_ocr_engine()
+    primary_started = perf_counter()
     result = engine(image, use_det=True, use_cls=True, use_rec=True)
+    quality["timing_ms"]["primary_ocr"] = round((perf_counter() - primary_started) * 1000, 1)
 
     # Phone photographs frequently arrive with the package panel sideways.
     # A strong majority of tall detected text boxes is a reliable indication
     # that the whole frame, rather than individual text, needs rotation.
-    rotation = 0
+    rotation = 270 if pre_rotated_live else 0
+    orientation_started = perf_counter()
     if result.boxes is not None and len(result.boxes):
         tall = 0
         for box in result.boxes:
@@ -92,13 +117,13 @@ def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], di
             if max(ys) - min(ys) > (max(xs) - min(xs)) * 1.35:
                 tall += 1
         if tall / len(result.boxes) >= 0.55:
-            counter_clockwise = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            rotated_result = engine(counter_clockwise, use_det=True, use_cls=True, use_rec=True)
-            original_count = len(result.txts) if result.txts is not None else 0
-            if rotated_result.txts is not None and len(rotated_result.txts) >= original_count * 0.75:
-                image = counter_clockwise
-                result = rotated_result
-                rotation = 270
+            alternative = original_orientation if pre_rotated_live else cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            alternative_result = engine(alternative, use_det=True, use_cls=True, use_rec=True)
+            if _result_score(alternative_result) >= _result_score(result):
+                image = alternative
+                result = alternative_result
+                rotation = 0 if pre_rotated_live else 270
+    quality["timing_ms"]["orientation_fallback"] = round((perf_counter() - orientation_started) * 1000, 1)
     quality["auto_rotation_degrees"] = rotation
 
     # Keep the naturally oriented pixels for the dot-matrix pass. Cubic
@@ -110,7 +135,7 @@ def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], di
     # Small phone frames are upscaled and gently sharpened only when the first
     # pass is weak, avoiding a routine second full-model invocation.
     quality["enhanced_for_small_text"] = False
-    if min(image.shape[:2]) < 900 and _needs_enhanced_pass(result):
+    if not live and min(image.shape[:2]) < 900 and _needs_enhanced_pass(result):
         scale = min(1.7, 1200 / min(image.shape[:2]))
         enhanced = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.1)
@@ -121,7 +146,21 @@ def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], di
             result = enhanced_result
             quality["enhanced_for_small_text"] = True
 
-    dot_matrix_lines = extract_dot_matrix_lines(dot_matrix_image, dot_matrix_result, image_id, engine)
+    detected_text = " ".join(str(text).lower() for text in (dot_matrix_result.txts or []))
+    has_stamped_declaration = any(
+        signal in detected_text
+        for signal in ("mrp", "batch", "mfg", "mfd", "date of manufacture", "use by", "packed on")
+    )
+    # A clear live frame with a stamped declaration still gets targeted row
+    # recognition so price/date accuracy is preserved. Ordinary/front frames
+    # return after primary OCR instead of paying this serial cost unnecessarily.
+    stamped_started = perf_counter()
+    dot_matrix_lines = (
+        extract_dot_matrix_lines(dot_matrix_image, dot_matrix_result, image_id, engine)
+        if not live or (blur_variance >= 100 and has_stamped_declaration)
+        else []
+    )
+    quality["timing_ms"]["stamped_fields"] = round((perf_counter() - stamped_started) * 1000, 1)
 
     lines: list[dict[str, Any]] = []
     if result.boxes is None or result.txts is None or result.scores is None:
@@ -139,9 +178,10 @@ def run_ocr(image_bytes: bytes, image_id: str) -> tuple[list[dict[str, Any]], di
     lines.extend(dot_matrix_lines)
     quality["dot_matrix_fields_detected"] = len(dot_matrix_lines)
     quality["ocr_cache_hit"] = False
+    quality["timing_ms"]["total"] = round((perf_counter() - started) * 1000, 1)
     with _ocr_cache_lock:
-        _ocr_cache[digest] = deepcopy((lines, quality))
-        _ocr_cache.move_to_end(digest)
+        _ocr_cache[cache_key] = deepcopy((lines, quality))
+        _ocr_cache.move_to_end(cache_key)
         while len(_ocr_cache) > _OCR_CACHE_LIMIT:
             _ocr_cache.popitem(last=False)
     return lines, quality

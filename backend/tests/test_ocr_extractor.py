@@ -1,10 +1,50 @@
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+
 from app.ocr.extractor import extract_declarations
 from app.api import _grouping_tokens, _token_similarity
 from app.ocr.dot_matrix import _date, _normalize
+from app.ocr import service
 
 
 def line(text, confidence=0.95, image_id="IMG-001", y=0):
     return {"text": text, "confidence": confidence, "image_id": image_id, "bbox": [10, y, 400, y + 20]}
+
+
+def test_live_ocr_uses_fast_primary_pass_and_keeps_full_cache_separate(monkeypatch):
+    image = np.full((620, 820, 3), 180, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", image)
+    assert ok
+    result = SimpleNamespace(
+        boxes=np.array([[[10, 10], [300, 10], [300, 40], [10, 40]]]),
+        txts=["MRP Rs. 23.00"],
+        scores=[.96],
+    )
+    engine_calls = []
+    dot_calls = []
+
+    def engine(*args, **kwargs):
+        engine_calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(service, "get_ocr_engine", lambda: engine)
+    monkeypatch.setattr(service, "extract_dot_matrix_lines", lambda *args: dot_calls.append(True) or [])
+    service._ocr_cache.clear()
+
+    live_lines, live_quality = service.run_ocr(encoded.tobytes(), "CAM-1", live=True)
+    live_engine_calls = len(engine_calls)
+    full_lines, full_quality = service.run_ocr(encoded.tobytes(), "IMG-1")
+
+    assert live_lines[0]["text"] == "MRP Rs. 23.00"
+    assert live_quality["dot_matrix_fields_detected"] == 0
+    assert live_engine_calls == 1
+    assert len(engine_calls) > live_engine_calls
+    assert dot_calls == [True]
+    assert not live_quality["ocr_cache_hit"]
+    assert not full_quality["ocr_cache_hit"]
+    assert full_lines[0]["image_id"] == "IMG-1"
 
 
 def test_extracts_core_package_declarations_with_evidence_location():
@@ -181,5 +221,46 @@ def test_random_ocr_sentence_is_not_promoted_to_product_name():
     fields = extract_declarations([
         {**line("Tis O Ram Tmakorfancy Name Andoes Otrerent Ts True Natue", confidence=.96), "bbox": [5, 5, 900, 90]},
         line("FSSAI Lic. No. 10016051001876", y=100),
+    ])
+    assert "product_name" not in fields
+
+
+def test_maps_values_when_live_ocr_splits_labels_into_adjacent_boxes():
+    def box(text, x, y, width=180, confidence=.94):
+        return {"text": text, "confidence": confidence, "image_id": "CAM-001", "bbox": [x, y, x + width, y + 24]}
+
+    fields = extract_declarations([
+        box("MRP", 20, 10, 75), box("₹ 230", 115, 12, 90),
+        box("Net Wt.", 20, 50, 90), box("500 g", 125, 52, 80),
+        box("Packed On", 20, 90, 110), box("FEB-2026", 150, 92, 105),
+        box("Use By", 20, 130, 85), box("AUG-2026", 150, 132, 105),
+        box("Batch No.", 20, 170, 100), box("E-UN26-1265", 150, 172, 145),
+        box("Customer Care", 20, 210, 130), box("+91 98765 43210", 170, 212, 165),
+    ])
+
+    assert fields["mrp"]["value"] == "MRP ₹230"
+    assert fields["net_quantity"]["value"] == "500 g"
+    assert fields["manufacture_pack_import_date"]["value"] == "02/2026"
+    assert fields["best_before_or_use_by"]["value"] == "08/2026"
+    assert fields["batch_number"]["value"] == "E-UN26-1265"
+    assert fields["consumer_phone"]["value"] == "+919876543210"
+    assert "MRP ₹ 230" in fields["mrp"]["raw_text"]
+
+
+def test_complete_numeric_value_beats_higher_confidence_clipped_fragment():
+    fields = extract_declarations([
+        line("MRP ₹230.00", confidence=.94, image_id="CAM-001"),
+        line("MRP ₹2", confidence=.99, image_id="CAM-002"),
+        line("Net Wt. 500 g", confidence=.93, image_id="CAM-001", y=30),
+        line("Net Wt. 5 g", confidence=.98, image_id="CAM-002", y=30),
+    ])
+    assert fields["mrp"]["value"] == "MRP ₹230.00"
+    assert fields["net_quantity"]["value"] == "500 g"
+
+
+def test_single_prominent_brand_fragment_is_not_a_complete_product_name():
+    fields = extract_declarations([
+        {**line("ACME", confidence=.99), "bbox": [10, 10, 500, 80]},
+        line("Net Quantity 500 g", y=100),
     ])
     assert "product_name" not in fields

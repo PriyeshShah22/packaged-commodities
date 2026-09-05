@@ -1,6 +1,7 @@
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 import re
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -27,6 +28,7 @@ router = APIRouter()
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_OCR_WORKERS = 3
+OCR_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS, thread_name_prefix="packmetrix-ocr")
 
 
 def _image_hash(content: bytes) -> str:
@@ -153,7 +155,12 @@ def evaluate_validation(payload: ValidationRequest, _: User = Depends(require_ro
 
 
 @router.post("/ocr/extract")
-def extract_image_declarations(files: list[UploadFile] = File(...), _: User = Depends(require_roles("inspector", "admin"))):
+def extract_image_declarations(
+    files: list[UploadFile] = File(...),
+    live: bool = Query(False),
+    _: User = Depends(require_roles("inspector", "admin")),
+):
+    request_started = perf_counter()
     if not files or len(files) > 12:
         raise HTTPException(status_code=400, detail="Upload between 1 and 12 package images.")
 
@@ -170,21 +177,31 @@ def extract_image_declarations(files: list[UploadFile] = File(...), _: User = De
         index, filename, content = item
         image_id = f"IMG-{index + 1:03d}"
         try:
-            lines, quality = run_ocr(content, image_id)
+            lines, quality = run_ocr(content, image_id, live=live)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=f"{filename}: {error}") from error
         return {"image_id": image_id, "file_name": filename, "quality": quality, "line_count": len(lines), "lines": lines}
 
     # Keep concurrency bounded while allowing front/back/side panels to overlap.
-    with ThreadPoolExecutor(max_workers=min(MAX_OCR_WORKERS, len(uploads))) as executor:
-        image_results = list(executor.map(process, uploads))
+    # Reuse bounded worker threads so their thread-local ONNX engines stay warm
+    # across Live OCR requests. Creating a pool here used to reload all models
+    # for each accepted camera frame.
+    image_results = list(OCR_EXECUTOR.map(process, uploads))
     all_lines = [line for image in image_results for line in image["lines"]]
+    extraction_started = perf_counter()
+    fields = extract_declarations(all_lines)
+    extraction_ms = round((perf_counter() - extraction_started) * 1000, 1)
 
     return {
         "engine": "RapidOCR PP-OCRv6 / ONNX Runtime",
         "images": image_results,
         "total_lines": len(all_lines),
-        "fields": extract_declarations(all_lines),
+        "fields": fields,
+        "timing": {
+            "ocr_ms": round(sum(image["quality"].get("timing_ms", {}).get("total", 0) for image in image_results), 1),
+            "structured_extraction_ms": extraction_ms,
+            "request_total_ms": round((perf_counter() - request_started) * 1000, 1),
+        },
     }
 
 
@@ -208,8 +225,7 @@ def bulk_group_images(files: list[UploadFile] = File(...), _: User = Depends(req
         fields = extract_declarations(lines)
         return {"index": index, "image_id": image_id, "file_name": filename, "quality": quality, "lines": lines, "fields": fields, "grouping_tokens": _grouping_tokens(lines, fields), "visual_hash": _image_hash(content), "color_signature": _color_signature(content)}
 
-    with ThreadPoolExecutor(max_workers=min(MAX_OCR_WORKERS, len(uploads))) as executor:
-        images = list(executor.map(process, uploads))
+    images = list(OCR_EXECUTOR.map(process, uploads))
 
     groups: list[dict] = []
     for image in images:
