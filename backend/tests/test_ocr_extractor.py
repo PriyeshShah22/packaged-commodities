@@ -401,3 +401,38 @@ def test_dynamic_value_lanes_preserve_printed_row_order():
     assert lanes["mrp"][2] <= lanes["manufacture_pack_import_date"][1]
     assert lanes["manufacture_pack_import_date"][2] <= lanes["best_before_or_use_by"][1]
     assert lanes["manufacture_pack_import_date"][0] < lanes["manufacture_pack_import_date"][1] < lanes["manufacture_pack_import_date"][2]
+
+
+def test_nutrition_quantity_is_not_promoted_to_package_net_quantity():
+    def box(text, x, y, width=140, height=22):
+        return {"text": text, "confidence": .96, "image_id": "BACK", "bbox": [x, y, x + width, y + height]}
+
+    fields = extract_declarations([
+        box("Total Carbohydrate", 20, 20, 180),
+        box("15.3 g", 220, 20, 70),
+        box("Protein", 20, 50, 100),
+        box("1.9 g", 220, 50, 60),
+    ])
+
+    assert "net_quantity" not in fields
+    assert "15.3 g" in fields["nutrition_information"]["value"]
+
+
+def test_batch_number_is_not_taken_from_explanatory_prose():
+    fields = extract_declarations([
+        line("Please scan the first character of batch no. and scan the 1000"),
+    ])
+
+    assert "batch_number" not in fields
+
+
+def test_unit_price_can_be_reviewably_derived_for_one_base_unit():
+    fields = extract_declarations([
+        line("NET QUANTITY: 1 L", y=10),
+        line("MRP ₹220.00 inclusive of all taxes", y=40),
+        line("UNIT SALE PRICE ₹:", y=70),
+    ])
+
+    assert fields["unit_sale_price"]["value"] == "₹220.00 per L"
+    assert fields["unit_sale_price"]["confidence"] < .7
+    assert "Calculated" in fields["unit_sale_price"]["inference"]

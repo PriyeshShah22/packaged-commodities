@@ -244,13 +244,39 @@ def _after_anchor(pattern: re.Pattern, value: str) -> str:
 
 
 def _batch_value(text: str) -> str:
-    remainder = _after_anchor(ANCHORS["batch_number"], text)
-    return next((
-        match.group(0).upper()
-        for match in BATCH.finditer(remainder)
-        if re.search(r"\d", match.group(0))
-        and not (match.group(0).isdigit() and 10 <= len(match.group(0)) <= 14)
-    ), "")
+    anchor = ANCHORS["batch_number"].search(text)
+    if not anchor:
+        return ""
+    remainder = text[anchor.end():].strip(" :-,;")
+    for match in BATCH.finditer(remainder):
+        token = match.group(0)
+        if not re.search(r"\d", token) or (token.isdigit() and 10 <= len(token) <= 14):
+            continue
+        # Legal/help prose can mention "batch no." and contain an unrelated
+        # number later in the sentence. A declaration places its value directly
+        # after the label, with at most a short connector such as "is".
+        intervening_words = re.findall(r"[A-Za-z]{2,}", remainder[:match.start()])
+        if len(intervening_words) > 1:
+            continue
+        return token.upper()
+    return ""
+
+
+def _inside_nutrition_table(item: dict[str, Any], image_lines: list[dict[str, Any]]) -> bool:
+    """Identify quantities belonging to a nutrition row by spatial context."""
+    item_box = item.get("bbox") or [0, 0, 0, 0]
+    item_x, item_y = _center(item)
+    item_height = max(12, item_box[3] - item_box[1])
+    for label in image_lines:
+        if label is item or not (NUTRIENT_LINE.search(label["text"]) or NUTRITION_HEADER.search(label["text"])):
+            continue
+        label_box = label.get("bbox") or [0, 0, 0, 0]
+        _label_x, label_y = _center(label)
+        same_row = abs(item_y - label_y) <= max(12, item_height * .8)
+        follows_label = label_box[0] - 15 <= item_x and item_box[0] - label_box[2] <= 420
+        if same_row and follows_label:
+            return True
+    return False
 
 
 def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -268,7 +294,12 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
         for item in image_lines:
             quantity = _normalize_quantity(item["text"])
             box = item.get("bbox") or [0, 0, 0, 0]
-            if quantity and QUANTITY.fullmatch(item["text"].strip()) and box[3] - box[1] >= median_height:
+            if (
+                quantity
+                and QUANTITY.fullmatch(item["text"].strip())
+                and box[3] - box[1] >= median_height
+                and not _inside_nutrition_table(item, image_lines)
+            ):
                 # A standalone, visually prominent quantity is common on the
                 # white stamp panel even when its faint "Net Weight" caption is
                 # missed. Keep a modest penalty so an explicit label wins.
@@ -490,6 +521,22 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
     mrp_amount = price_amount("mrp")
     unit_amount = price_amount("unit_sale_price")
     quantity_match = re.search(r"(\d+(?:\.\d+)?)\s*(kg|g|ml|L)\b", str(fields.get("net_quantity", {}).get("value", "")), re.I)
+    if mrp_amount and not unit_amount and quantity_match and float(quantity_match.group(1)) == 1:
+        unit_labels = [
+            line for image_lines in by_image.values() for line in image_lines
+            if ANCHORS["unit_sale_price"].search(line["text"])
+        ]
+        if unit_labels:
+            unit = quantity_match.group(2)
+            amount = f"{mrp_amount:.2f}" if "." in fields["mrp"]["value"] else f"{mrp_amount:g}"
+            source = [unit_labels[0]]
+            fields["unit_sale_price"] = {
+                **_candidate("unit_sale_price", f"₹{amount} per {unit}", source, .2),
+                "confidence": min(.69, fields["mrp"]["confidence"], fields["net_quantity"]["confidence"]),
+                "alternatives": [],
+                "inference": "Calculated from a visible unit-sale-price label, MRP, and net quantity of one base unit",
+            }
+            unit_amount = mrp_amount
     unit_match = re.search(r"per\s*(kg|g|ml|L)\b", str(fields.get("unit_sale_price", {}).get("value", "")), re.I)
     if mrp_amount and unit_amount and quantity_match and unit_match:
         quantity = float(quantity_match.group(1))

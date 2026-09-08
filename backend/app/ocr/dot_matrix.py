@@ -90,12 +90,19 @@ def _recognize_row(engine: Any, row: np.ndarray) -> tuple[str, float]:
     bordered = cv2.copyMakeBorder(gray, 6, 6, 8, 8, cv2.BORDER_CONSTANT, value=255)
     enlarged = cv2.resize(bordered, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     sharpened = cv2.addWeighted(enlarged, 1.35, cv2.GaussianBlur(enlarged, (0, 0), 1), -0.35, 0)
+    # Join nearby inkjet dots into character strokes. This is derived from the
+    # crop's own contrast and works for dark-on-light batch/date panels without
+    # assuming a brand, value, font, or sticker position.
+    contrasted = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(enlarged)
+    _threshold, inverted = cv2.threshold(contrasted, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    connected = cv2.morphologyEx(inverted, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8), iterations=1)
+    dot_reconnected = 255 - connected
 
     # The sharpened crop is the most reliable default for faint stamps. Running
     # all three variants for every row multiplied a five-row sticker into dozens
     # of ONNX calls. Only fall back when the first result is genuinely weak.
     best = ("", 0.0)
-    candidates = [sharpened, enlarged]
+    candidates = [sharpened, dot_reconnected, enlarged]
     for candidate in candidates:
         result = engine(candidate, use_det=False, use_cls=False, use_rec=True)
         if result.txts is None or result.scores is None or not len(result.txts):
@@ -202,8 +209,16 @@ def _is_plausible_row_value(field: str, text: str) -> bool:
     if field in {"mrp", "unit_sale_price"}:
         stripped = re.sub(r"\b(?:RS|INR)\b", "", text.upper())
         letters = re.sub(r"[^A-Z]", "", stripped)
-        date_shaped = len(re.findall(r"[./:-]", text)) >= 2 or bool(re.search(r"(?:19|20)\d{1,2}", text))
-        return bool(_amount(text) and not letters and not date_shaped and not _date(text)[0])
+        date_shaped = bool(
+            re.search(r"\d{1,2}[./:-]\d{1,2}[./:-]\d{2,4}", text)
+            or re.search(r"(?:19|20)\d{2}", text)
+        )
+        # Currency symbols and "PER LTR" are frequently recognized as a few
+        # stray letters (for example ₹ -> ES). Permit short price-like residue,
+        # while still excluding word-heavy batch/legal text and date shapes.
+        price_words_only = bool(letters) and all(character in "RSINEFLTKGM" for character in letters)
+        price_words_only = not letters or price_words_only
+        return bool(_amount(text) and price_words_only and not date_shaped and not _date(text)[0])
     return False
 
 
@@ -262,6 +277,117 @@ def _value_lanes(
             bottom = centre + max(typical_height * 0.8, previous_gap / 2)
         lanes[field] = (max(0.0, top), centre, min(float(image_height), bottom))
     return lanes
+
+
+def _panel_right_edge(
+    image: np.ndarray,
+    value_left: int,
+    suggested_right: int,
+    anchors: dict[str, tuple[tuple[int, int, int, int], float, str]],
+    typical_height: float,
+) -> int:
+    """Stop recognition at a light declaration panel's observed right edge."""
+    if suggested_right - value_left < typical_height * 5:
+        return suggested_right
+    top = max(0, round(min(item[0][1] for item in anchors.values()) - typical_height))
+    bottom = min(image.shape[0], round(max(item[0][3] for item in anchors.values()) + typical_height))
+    gray = cv2.cvtColor(image[top:bottom], cv2.COLOR_BGR2GRAY)
+    column_medians = np.median(gray[:, value_left:suggested_right], axis=0)
+    sample_width = min(len(column_medians), max(8, round(typical_height * 2)))
+    panel_level = float(np.median(column_medians[:sample_width]))
+    # Do not impose a light-sticker assumption on declarations printed directly
+    # on dark or coloured packaging.
+    if panel_level < 145:
+        return suggested_right
+    dark = column_medians < panel_level - 45
+    minimum_width = max(round(typical_height * 5), 100)
+    run = max(4, round(typical_height * .2))
+    for index in range(minimum_width, max(minimum_width, len(dark) - run)):
+        if bool(np.all(dark[index:index + run])):
+            # Curved/photographed stickers do not share one perfectly vertical
+            # edge. Retain a scale-relative margin so the last characters are
+            # not clipped by the earliest dark column found in the row band.
+            return min(suggested_right, round(value_left + index + typical_height * 3))
+    return suggested_right
+
+
+def _recognize_date_block(
+    image: np.ndarray,
+    engine: Any,
+    anchors: dict[str, tuple[tuple[int, int, int, int], float, str]],
+    value_left: int,
+    value_right: int,
+    typical_height: float,
+    image_id: str,
+) -> list[dict[str, Any]]:
+    """Detect all faint date rows together and map them in reading order."""
+    date_fields = [
+        field for field in ("manufacture_pack_import_date", "best_before_or_use_by")
+        if field in anchors
+    ]
+    if not date_fields or value_right - value_left < 40:
+        return []
+    date_boxes = [anchors[field][0] for field in date_fields]
+    # Include the compact stamped rows immediately above the printed date
+    # captions, without allowing unrelated package background to dominate the
+    # adaptive threshold used for the faint ink.
+    top = max(0, round(min(box[1] for box in date_boxes) - typical_height * 2.5))
+    bottom = min(image.shape[0], round(max(box[3] for box in date_boxes) + typical_height * .4))
+    crop = image[top:bottom, value_left:value_right]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    enlarged = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    contrasted = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(enlarged)
+    _threshold, binary = cv2.threshold(contrasted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    detected = engine(binary, use_det=True, use_cls=False, use_rec=True)
+    if detected.boxes is None or detected.txts is None or detected.scores is None:
+        return []
+
+    date_rows = []
+    for box, raw, score in zip(detected.boxes, detected.txts, detected.scores, strict=False):
+        bounds = _bounds(box)
+        center_y = top + (bounds[1] + bounds[3]) / 6
+        text = str(raw)
+        value, corrected = _date(text)
+        if not value and _looks_like_partial_date(text):
+            row_top = max(0, round(center_y - typical_height * .55))
+            row_bottom = min(image.shape[0], round(center_y + typical_height * .55))
+            refined, refined_score = _recognize_row(engine, image[row_top:row_bottom, value_left:value_right])
+            refined_value, refined_corrected = _date(refined)
+            if refined_value:
+                text, value, corrected, score = refined, refined_value, refined_corrected, refined_score
+        if value:
+            date_rows.append((center_y, value, text, float(score), corrected))
+
+    unique: dict[tuple[int, str], tuple[float, str, str, float, bool]] = {}
+    for row in date_rows:
+        key = (round(row[0] / max(1, typical_height * .4)), row[1])
+        if key not in unique or row[3] > unique[key][3]:
+            unique[key] = row
+    ordered_rows = sorted(unique.values(), key=lambda row: row[0])
+    if not ordered_rows:
+        return []
+
+    ordered_fields = sorted(
+        date_fields,
+        key=lambda field: (anchors[field][0][1] + anchors[field][0][3]) / 2,
+    )
+    # When both rows are detected, preserve their order even though compressed
+    # stamping can place each value nearer to a different printed label.
+    selected_rows = ordered_rows[-len(ordered_fields):] if len(ordered_rows) >= len(ordered_fields) else ordered_rows
+    selected_fields = ordered_fields[-len(selected_rows):]
+    lines = []
+    for field, (center_y, value, raw, confidence, corrected) in zip(selected_fields, selected_rows, strict=True):
+        label = "Date of manufacture" if field == "manufacture_pack_import_date" else "Use by date"
+        half = max(10, round(typical_height * .55))
+        lines.append({
+            "text": f"{label}: {value}",
+            "confidence": round(max(.45, confidence - (.1 if corrected else .03)), 4),
+            "bbox": [float(value_left), float(max(0, center_y - half)), float(value_right), float(min(image.shape[0], center_y + half))],
+            "image_id": image_id,
+            "source_type": "dot_matrix_ocr",
+            "raw_text": raw,
+        })
+    return lines
 
 
 def _estimate_alignment_shifts(
@@ -396,6 +522,7 @@ def extract_dot_matrix_lines(
     engine: Any,
     *,
     coordinate_scale: float = 1.0,
+    comprehensive: bool = False,
 ) -> list[dict[str, Any]]:
     if result.boxes is None or result.txts is None:
         return []
@@ -443,6 +570,7 @@ def extract_dot_matrix_lines(
     # beyond it substantially lowers recognition accuracy for faint characters.
     value_width = max(round((label_right - label_left) * 2.8), round(typical_height * 14))
     value_right = min(image.shape[1], value_left + value_width)
+    value_right = _panel_right_edge(image, value_left, value_right, anchors, typical_height)
     field_shifts, global_shift = _estimate_alignment_shifts(
         anchors, result, coordinate_scale, typical_height, value_right
     )
@@ -506,4 +634,32 @@ def extract_dot_matrix_lines(
             "source_type": "dot_matrix_ocr",
             "raw_text": raw,
         })
+    if comprehensive:
+        block_dates = _recognize_date_block(
+            image, engine, anchors, value_left, value_right, typical_height, image_id
+        )
+        date_prefixes = ("Date of manufacture:", "Use by date:")
+        combined_dates = [line for line in [*lines, *block_dates] if line["text"].startswith(date_prefixes)]
+        by_value: dict[str, dict[str, Any]] = {}
+        for line in combined_dates:
+            value = line["text"].split(":", 1)[1].strip()
+            if value not in by_value or line["confidence"] > by_value[value]["confidence"]:
+                by_value[value] = line
+        ordered_dates = sorted(
+            by_value.values(),
+            key=lambda line: ((line.get("bbox") or [0, 0, 0, 0])[1] + (line.get("bbox") or [0, 0, 0, 0])[3]) / 2,
+        )
+        ordered_fields = [
+            field for field in ("manufacture_pack_import_date", "best_before_or_use_by")
+            if field in anchors
+        ]
+        if ordered_dates:
+            chosen = ordered_dates[-len(ordered_fields):]
+            chosen_fields = ordered_fields[-len(chosen):]
+            for field, line in zip(chosen_fields, chosen, strict=True):
+                value = line["text"].split(":", 1)[1].strip()
+                label = "Date of manufacture" if field == "manufacture_pack_import_date" else "Use by date"
+                line["text"] = f"{label}: {value}"
+            lines = [line for line in lines if not line["text"].startswith(date_prefixes)]
+            lines.extend(chosen)
     return lines

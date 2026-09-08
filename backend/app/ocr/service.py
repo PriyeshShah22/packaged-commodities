@@ -75,6 +75,19 @@ def _needs_enhanced_pass(result) -> bool:
     return average < 0.72
 
 
+def _tall_box_ratio(result) -> float:
+    """Return how strongly OCR geometry indicates a sideways package panel."""
+    if result.boxes is None or not len(result.boxes):
+        return 0.0
+    tall = 0
+    for box in result.boxes:
+        xs = [float(point[0]) for point in box]
+        ys = [float(point[1]) for point in box]
+        if max(ys) - min(ys) > (max(xs) - min(xs)) * 1.35:
+            tall += 1
+    return tall / len(result.boxes)
+
+
 def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     started = perf_counter()
     digest = hashlib.sha256(image_bytes).hexdigest()
@@ -141,16 +154,22 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
     rotation = 270 if pre_rotated_live else 0
     orientation_started = perf_counter()
     if result.boxes is not None and len(result.boxes):
-        tall = 0
-        for box in result.boxes:
-            xs = [float(point[0]) for point in box]
-            ys = [float(point[1]) for point in box]
-            if max(ys) - min(ys) > (max(xs) - min(xs)) * 1.35:
-                tall += 1
-        if tall / len(result.boxes) >= 0.55:
+        original_tall_ratio = _tall_box_ratio(result)
+        if original_tall_ratio >= 0.55:
             alternative = original_orientation if pre_rotated_live else cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
             alternative_result = engine(alternative, use_det=True, use_cls=True, use_rec=True)
-            if _result_score(alternative_result) >= _result_score(result):
+            alternative_score = _result_score(alternative_result)
+            original_score = _result_score(result)
+            # The recognizer can rotate individual word crops and achieve a
+            # deceptively high text score while leaving every bounding box
+            # sideways. Prefer coherent whole-panel geometry when it retains
+            # most of the textual evidence; targeted label/value alignment
+            # depends on those coordinates sharing one reading direction.
+            geometry_repaired = (
+                _tall_box_ratio(alternative_result) <= original_tall_ratio * 0.35
+                and alternative_score >= original_score * 0.72
+            )
+            if alternative_score >= original_score or geometry_repaired:
                 image = alternative
                 result = alternative_result
                 rotation = 0 if pre_rotated_live else 270
@@ -192,6 +211,7 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
             image_id,
             engine,
             coordinate_scale=coordinate_scale,
+            comprehensive=not live,
         )
         if not live or max(source_blur_variance, blur_variance) >= 100
         else []
