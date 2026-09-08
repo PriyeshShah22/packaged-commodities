@@ -7,6 +7,7 @@ stable spatial anchors for a recognition-only pass over each value row.
 
 import re
 from difflib import SequenceMatcher
+from itertools import combinations
 from typing import Any
 
 import cv2
@@ -128,6 +129,20 @@ def _amount(text: str) -> str:
 
 
 def _date(text: str) -> tuple[str, bool]:
+    month_names = {
+        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+    }
+    upper = text.upper()
+    month_token = next((name for name in month_names if re.search(rf"\b{name}[A-Z]*\b", upper)), None)
+    if month_token:
+        numbers = [int(value) for value in re.findall(r"\d{1,4}", upper)]
+        year = next((value for value in reversed(numbers) if value >= 1000), None)
+        day = next((value for value in numbers if value != year and 1 <= value <= 31), None)
+        if year and 2000 <= year <= 2099:
+            month = month_names[month_token]
+            return (f"{day:02d}/{month:02d}/{year:04d}" if day else f"{month:02d}/{year:04d}"), False
+
     digits = re.sub(r"\D", "", text)
     corrected = False
     if len(digits) >= 8:
@@ -161,12 +176,166 @@ def _date(text: str) -> tuple[str, bool]:
         if 1 <= int(repaired[:2]) <= 31 and 1 <= int(repaired[2:4]) <= 12:
             digits = repaired
             corrected = True
+    if len(digits) == 6:
+        day, month, short_year = int(digits[:2]), int(digits[2:4]), int(digits[4:])
+        if 1 <= day <= 31 and 1 <= month <= 12:
+            return f"{day:02d}/{month:02d}/{2000 + short_year:04d}", True
     if len(digits) != 8:
         return "", corrected
     day, month, year = int(digits[:2]), int(digits[2:4]), int(digits[4:])
     if not (1 <= day <= 31 and 1 <= month <= 12 and 2000 <= year <= 2099):
         return "", corrected
     return f"{day:02d}/{month:02d}/{year:04d}", corrected
+
+
+def _is_plausible_row_value(field: str, text: str) -> bool:
+    """Identify already-detected values without assuming a specific layout."""
+    if _row_field(text):
+        return False
+    if field in {"manufacture_pack_import_date", "best_before_or_use_by"}:
+        return bool(_date(text)[0])
+    if field == "net_quantity":
+        return bool(re.search(r"\d+(?:[.]\d+)?\s*(?:kg|g|gm|ml|l|ltr)\b", text, re.I))
+    if field == "batch_number":
+        compact = re.sub(r"[^A-Z0-9]", "", text.upper())
+        return len(compact) >= 3 and bool(re.search(r"[A-Z]", compact) and re.search(r"\d", compact))
+    if field in {"mrp", "unit_sale_price"}:
+        stripped = re.sub(r"\b(?:RS|INR)\b", "", text.upper())
+        letters = re.sub(r"[^A-Z]", "", stripped)
+        date_shaped = len(re.findall(r"[./:-]", text)) >= 2 or bool(re.search(r"(?:19|20)\d{1,2}", text))
+        return bool(_amount(text) and not letters and not date_shaped and not _date(text)[0])
+    return False
+
+
+def _looks_like_partial_date(text: str) -> bool:
+    """Use damaged dates for geometry without accepting them as final values."""
+    digits = re.sub(r"\D", "", text)
+    separators = len(re.findall(r"[./:-]", text))
+    return bool(
+        _date(text)[0]
+        or (len(digits) >= 6 and separators >= 2)
+        or (len(digits) >= 6 and re.search(r"(?:19|20)\d{1,2}", digits))
+    )
+
+
+def _value_lanes(
+    anchors: dict[str, tuple[tuple[int, int, int, int], float, str]],
+    field_shifts: dict[str, float],
+    global_shift: float,
+    typical_height: float,
+    image_height: int,
+) -> dict[str, tuple[float, float, float]]:
+    """Give each label one exclusive value lane, even when rows are staggered.
+
+    The lane centres are inferred from OCR detections in this image.  Midpoints
+    between adjacent centres prevent a strong recognition from a neighbouring
+    row (for example a batch number) from being reused as an MRP or date.
+    """
+    ordered = sorted(
+        anchors,
+        key=lambda field: (anchors[field][0][1] + anchors[field][0][3]) / 2,
+    )
+    centres: dict[str, float] = {}
+    previous = float("-inf")
+    minimum_gap = typical_height * 0.45
+    for field in ordered:
+        anchor = anchors[field][0]
+        label_y = (anchor[1] + anchor[3]) / 2
+        projected = label_y + field_shifts.get(field, global_shift)
+        # Noisy partial OCR must not reverse the physical order of printed rows.
+        projected = max(projected, previous + minimum_gap)
+        centres[field] = projected
+        previous = projected
+
+    lanes: dict[str, tuple[float, float, float]] = {}
+    for index, field in enumerate(ordered):
+        centre = centres[field]
+        if index:
+            top = (centres[ordered[index - 1]] + centre) / 2
+        else:
+            next_gap = centres[ordered[1]] - centre if len(ordered) > 1 else typical_height * 2
+            top = centre - max(typical_height * 0.8, next_gap / 2)
+        if index + 1 < len(ordered):
+            bottom = (centre + centres[ordered[index + 1]]) / 2
+        else:
+            previous_gap = centre - centres[ordered[index - 1]] if index else typical_height * 2
+            bottom = centre + max(typical_height * 0.8, previous_gap / 2)
+        lanes[field] = (max(0.0, top), centre, min(float(image_height), bottom))
+    return lanes
+
+
+def _estimate_alignment_shifts(
+    anchors: dict[str, tuple[tuple[int, int, int, int], float, str]],
+    result: Any,
+    coordinate_scale: float,
+    typical_height: float,
+    value_right: int,
+) -> tuple[dict[str, float], float]:
+    """Learn whether values sit above or below labels from the current image."""
+    detected_values: list[tuple[tuple[int, int, int, int], str]] = []
+    boxes = [] if result.boxes is None else result.boxes
+    texts = [] if result.txts is None else result.txts
+    for box, raw_text in zip(boxes, texts, strict=False):
+        bounds = tuple(round(value * coordinate_scale) for value in _bounds(box))
+        detected_values.append((bounds, str(raw_text)))
+
+    shifts: dict[str, float] = {}
+
+    # Dates are assigned one-to-one. A partly missed Use By date must not cause
+    # the already-detected Packed On date to be copied into both legal fields.
+    date_fields = [
+        field for field in ("manufacture_pack_import_date", "best_before_or_use_by")
+        if field in anchors
+    ]
+    date_values = [
+        (bounds, text) for bounds, text in detected_values
+        if not _row_field(text) and _looks_like_partial_date(text)
+    ]
+    # Match date rows in reading order, not merely to the closest label. On
+    # many packs all dot-matrix values are shifted upward: the Use By value may
+    # therefore be physically closer to the Packed On label than its own.
+    ordered_date_fields = sorted(
+        date_fields,
+        key=lambda field: (anchors[field][0][1] + anchors[field][0][3]) / 2,
+    )
+    ordered_date_values = sorted(date_values, key=lambda item: (item[0][1] + item[0][3]) / 2)
+    if ordered_date_fields and len(ordered_date_values) >= len(ordered_date_fields):
+        valid_assignments = []
+        for chosen in combinations(ordered_date_values, len(ordered_date_fields)):
+            assignment = []
+            for field, (bounds, _text) in zip(ordered_date_fields, chosen, strict=True):
+                anchor = anchors[field][0]
+                anchor_y = (anchor[1] + anchor[3]) / 2
+                value_x = (bounds[0] + bounds[2]) / 2
+                value_y = (bounds[1] + bounds[3]) / 2
+                delta = value_y - anchor_y
+                if not (anchor[2] - typical_height * .5 <= value_x <= value_right and abs(delta) <= typical_height * 3.5):
+                    break
+                assignment.append((field, delta))
+            else:
+                valid_assignments.append((sum(abs(delta) for _field, delta in assignment), assignment))
+        if valid_assignments:
+            for field, delta in min(valid_assignments, key=lambda item: item[0])[1]:
+                shifts[field] = delta
+
+    for field, (anchor, _slope, _label) in anchors.items():
+        if field in date_fields:
+            continue
+        anchor_y = (anchor[1] + anchor[3]) / 2
+        possible = []
+        for bounds, text in detected_values:
+            value_x = (bounds[0] + bounds[2]) / 2
+            value_y = (bounds[1] + bounds[3]) / 2
+            if value_x < anchor[2] - typical_height * .5 or value_x > value_right:
+                continue
+            delta = value_y - anchor_y
+            if abs(delta) <= typical_height * 3.5 and _is_plausible_row_value(field, text):
+                possible.append((abs(delta), delta))
+        if possible:
+            shifts[field] = min(possible)[1]
+
+    global_shift = float(np.median(list(shifts.values()))) if shifts else 0.0
+    return shifts, global_shift
 
 
 def _normalize(field: str, text: str) -> tuple[str, float]:
@@ -274,36 +443,32 @@ def extract_dot_matrix_lines(
     # beyond it substantially lowers recognition accuracy for faint characters.
     value_width = max(round((label_right - label_left) * 2.8), round(typical_height * 14))
     value_right = min(image.shape[1], value_left + value_width)
+    field_shifts, global_shift = _estimate_alignment_shifts(
+        anchors, result, coordinate_scale, typical_height, value_right
+    )
+    lanes = _value_lanes(
+        anchors, field_shifts, global_shift, typical_height, image.shape[0]
+    )
 
     lines: list[dict[str, Any]] = []
     # Project every label's actual baseline across to the value column. This
     # follows skew/perspective and supports irregular row spacing instead of
     # assuming that every manufacturer's sticker uses one fixed template.
     for field, (anchor, _slope, label_text) in anchors.items():
-        # Inkjet values are commonly printed on a separately applied white
-        # sticker whose rows sit slightly above the pre-printed captions. Try a
-        # small scale-relative band, never a product-specific pixel position.
-        label_center_y = (anchor[1] + anchor[3]) / 2
-        # Longer printed captions can sit below their corresponding stamped
-        # baseline. The first of two dated rows (Packed/Mfg) needs the upper
-        # band; the later Use-by row remains centered on the common shift.
-        shift = {
-            "net_quantity": 0.4,
-            "batch_number": 0.6,
-            "mrp": 0.75,
-            "unit_sale_price": 1.1,
-            "manufacture_pack_import_date": 1.45,
-            "best_before_or_use_by": 1.3,
-        }.get(field, 0.85)
-        center_y = label_center_y - typical_height * shift
+        lane_top, center_y, lane_bottom = lanes[field]
         half_height = max(12, round(typical_height * (0.75 if field == "unit_sale_price" else 0.7 if "date" in field or "before" in field else 0.5)))
-        base_top = max(0, round(center_y - half_height))
-        base_bottom = min(image.shape[0], round(center_y + half_height))
+        base_top = max(round(lane_top), round(center_y - half_height))
+        base_bottom = min(round(lane_bottom), round(center_y + half_height))
         best = ("", "", 0.0, 0.0, base_top, base_bottom, value_left)
-        offsets = tuple(round(typical_height * value) for value in (0, -0.3, 0.3))
+        offsets = tuple(round(typical_height * value) for value in (0, -0.35, 0.35, -0.7, 0.7, -1.1, 1.1))
         for offset in offsets:
-            top = max(0, base_top + offset)
-            bottom = min(image.shape[0], base_bottom + offset)
+            candidate_center = center_y + offset
+            if not lane_top <= candidate_center <= lane_bottom:
+                continue
+            top = max(round(lane_top), round(candidate_center - half_height))
+            bottom = min(round(lane_bottom), round(candidate_center + half_height))
+            if bottom - top < 10:
+                continue
             # Try the expected value column first, then a full sticker row. The
             # second crop handles dot-matrix values printed below or overlapping
             # a differently sized label rather than perfectly aligned beside it.
@@ -316,8 +481,13 @@ def extract_dot_matrix_lines(
                 width_factor = 14 if field in {"batch_number", "manufacture_pack_import_date", "best_before_or_use_by"} else 9
                 field_value_right = min(value_right, round(value_left + typical_height * width_factor))
                 raw, confidence = _recognize_row(engine, image[top:bottom, crop_left:field_value_right])
+                # Classification is performed on the recognized value alone.
+                # Adding the label is useful for normalization, but must never
+                # make a batch/date-shaped neighbouring value look like a price.
+                if not _is_plausible_row_value(field, raw):
+                    continue
                 normalized, penalty = _normalize(field, f"{raw} {label_text}")
-                position_penalty = abs(offset) / max(1, typical_height) * 0.15
+                position_penalty = abs(offset) / max(1, typical_height) * 0.28
                 total_penalty = penalty + position_penalty
                 if normalized and confidence - total_penalty > best[2] - best[3]:
                     best = (normalized, raw, confidence, total_penalty, top, bottom, crop_left, field_value_right)

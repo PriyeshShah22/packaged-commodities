@@ -36,7 +36,7 @@ NUTRITION_HEADER = re.compile(r"\b(?:nutrition(?:al)?\s+(?:facts?|information)|a
 NUTRIENT_LINE = re.compile(r"\b(?:energy|calories?|kcal|protein|total\s+fat|saturated\s+fat|trans\s+fat|cholesterol|sod+i+um|carbohydrates?|dietary\s+fib(?:re|er)|total\s+sugars?|added\s+sugars?|serving\s+size)\b", re.I)
 SECTION_BOUNDARY = re.compile(r"\b(?:allergen|storage|consumer\s+care|manufactured|marketed|packed|net\s+(?:quantity|weight)|m\s*\.?\s*r\s*\.?\s*p|batch|fssai)\b", re.I)
 GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website|incl(?:usive)?|tax(?:es)?)\b", re.I)
-PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|feedback|queries|customer|consumer|allergens?|contains?|traces?|facility|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
+PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|feedback|queries|customer|consumer|allergens?|contains?|traces?|facility|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight|natural\s+feature\s+of\s+product|sourced\s+direct|premium\s+quality|wholesome\s+goodness)\b", re.I)
 
 
 def _center(line: dict[str, Any]) -> tuple[float, float]:
@@ -348,8 +348,14 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             anchor_height = max(16, anchor["bbox"][3] - anchor["bbox"][1])
             parts = []
             remainder = INGREDIENTS_ANCHOR.sub("", anchor["text"], count=1).strip(" :-,.;")
-            if len(re.findall(r"[A-Za-z]", remainder)) >= 3:
-                parts.append({**anchor, "text": remainder})
+            ingredient_remainder = re.split(
+                r"\b(?:allergens?|may\s+contain|facility|traces?|for\s+feedback)\b",
+                remainder,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip(" :-,.;")
+            if len(re.findall(r"[A-Za-z]", ingredient_remainder)) >= 3:
+                parts.append({**anchor, "text": ingredient_remainder})
             for item in ordered_lines:
                 if item is anchor:
                     continue
@@ -370,6 +376,18 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             if parts:
                 value = re.sub(r"\s+", " ", " ".join(item["text"].strip(" ,;") for item in parts)).strip(" ,;")
                 candidates["ingredients"].append(_candidate("ingredients", value, [anchor, *parts], .03))
+                # A single-ingredient package often declares its commodity only
+                # in the Ingredients line (for example, "Cashew Kernels"). This
+                # is stronger product identity evidence than nearby slogans.
+                identity = ingredient_remainder
+                if 1 <= len(identity.split()) <= 5 and len(re.findall(r"[A-Za-z]", identity)) >= 4:
+                    identity_source = {**anchor, "text": identity}
+                    commodity = _candidate("commodity_name", identity.title(), [identity_source], .1)
+                    product = _candidate("product_name", identity.title(), [identity_source], .1)
+                    commodity["source_type"] = "ingredient_identity"
+                    product["source_type"] = "ingredient_identity"
+                    candidates["commodity_name"].append(commodity)
+                    candidates["product_name"].append(product)
 
         nutrition_rows = []
         nutrition_sources = []

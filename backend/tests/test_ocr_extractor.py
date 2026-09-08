@@ -5,7 +5,14 @@ import numpy as np
 
 from app.ocr.extractor import extract_declarations
 from app.api import _grouping_tokens, _token_similarity
-from app.ocr.dot_matrix import _date, _normalize, _row_field
+from app.ocr.dot_matrix import (
+    _date,
+    _is_plausible_row_value,
+    _looks_like_partial_date,
+    _normalize,
+    _row_field,
+    _value_lanes,
+)
 from app.ocr import service
 
 
@@ -82,6 +89,19 @@ def test_cross_checks_damaged_dot_mrp_against_quantity_and_unit_price():
     assert fields["unit_sale_price"]["value"] == "₹1.70 per g"
     assert fields["mrp"]["value"] == "MRP ₹339.00 inclusive of all taxes"
     assert "Cross-checked" in fields["mrp"]["inference"]
+
+
+def test_single_ingredient_identity_beats_back_panel_marketing_slogan():
+    fields = extract_declarations([
+        line("SOURCED DIRECT", confidence=.99, y=10),
+        line("Natural feature of product", confidence=.98, y=40),
+        line("Ingredients: Cashew Kernels", confidence=.94, y=80),
+        line("Allergens: Contains tree nuts", confidence=.96, y=110),
+    ])
+
+    assert fields["product_name"]["value"] == "Cashew Kernels"
+    assert fields["commodity_name"]["value"] == "Cashew Kernels"
+    assert fields["product_name"]["source_type"] == "ingredient_identity"
 
 
 def test_label_anchoring_does_not_map_nutrition_values_to_net_quantity():
@@ -345,3 +365,39 @@ def test_semantic_consistency_rejects_impossible_unit_price_digit_join():
 
     assert fields["mrp"]["confidence"] < .8
     assert "unit_sale_price" not in fields
+
+
+def test_dot_matrix_date_parser_accepts_common_non_iso_formats():
+    assert _date("20 JUL 2026")[0] == "20/07/2026"
+    assert _date("200726")[0] == "20/07/2026"
+    assert _looks_like_partial_date("16-01-202")
+
+
+def test_dot_matrix_field_validation_rejects_neighbouring_row_types():
+    assert not _is_plausible_row_value("mrp", "AN2607488")
+    assert not _is_plausible_row_value("unit_sale_price", "20-07-2026")
+    assert _is_plausible_row_value("batch_number", "AN2607488")
+    assert _is_plausible_row_value("manufacture_pack_import_date", "20 JUL 2026")
+
+
+def test_dynamic_value_lanes_preserve_printed_row_order():
+    anchors = {
+        "mrp": ((10, 100, 60, 120), 0.0, "MRP"),
+        "manufacture_pack_import_date": ((10, 140, 90, 160), 0.0, "Packed On"),
+        "best_before_or_use_by": ((10, 180, 90, 200), 0.0, "Use By"),
+    }
+    lanes = _value_lanes(
+        anchors,
+        {
+            "mrp": -8,
+            "manufacture_pack_import_date": -28,
+            "best_before_or_use_by": -35,
+        },
+        global_shift=-20,
+        typical_height=20,
+        image_height=300,
+    )
+
+    assert lanes["mrp"][2] <= lanes["manufacture_pack_import_date"][1]
+    assert lanes["manufacture_pack_import_date"][2] <= lanes["best_before_or_use_by"][1]
+    assert lanes["manufacture_pack_import_date"][0] < lanes["manufacture_pack_import_date"][1] < lanes["manufacture_pack_import_date"][2]
