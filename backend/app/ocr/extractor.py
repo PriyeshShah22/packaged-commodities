@@ -29,14 +29,14 @@ BATCH = re.compile(r"\b[A-Z0-9][A-Z0-9/-]{3,}\b", re.I)
 FSSAI = re.compile(r"\b\d{14}\b")
 BARCODE = re.compile(r"\b\d{8,14}\b")
 COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|industries|enterprises|llp)\b", re.I)
-ADDRESS_HINT = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|india|pincode|pin|gujarat|maharashtra|delhi|mumbai|kolkata|chennai|bengaluru|bangalore|plot|sector|chamber|village|taluka)\b", re.I)
+ADDRESS_HINT = re.compile(r"\b(?:address|road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|post|p\.?o\.?|city|state|india|pincode|pin|plot|sector|chamber|village|taluka|nagar|colony|phase|block|building|floor|survey|unit)\b|\b\d{6}\b", re.I)
 NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?|allergens?|contains?|traces?)\b", re.I)
 INGREDIENTS_ANCHOR = re.compile(r"\bingredients?\b\s*[:.-]?", re.I)
 NUTRITION_HEADER = re.compile(r"\b(?:nutrition(?:al)?\s+(?:facts?|information)|amount\s+per\s+serving)\b", re.I)
 NUTRIENT_LINE = re.compile(r"\b(?:energy|calories?|kcal|protein|total\s+fat|saturated\s+fat|trans\s+fat|cholesterol|sod+i+um|carbohydrates?|dietary\s+fib(?:re|er)|total\s+sugars?|added\s+sugars?|serving\s+size)\b", re.I)
 SECTION_BOUNDARY = re.compile(r"\b(?:allergen|storage|consumer\s+care|manufactured|marketed|packed|net\s+(?:quantity|weight)|m\s*\.?\s*r\s*\.?\s*p|batch|fssai)\b", re.I)
 GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website|incl(?:usive)?|tax(?:es)?)\b", re.I)
-PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|feedback|queries|customer|consumer|allergens?|contains?|traces?|facility|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight|natural\s+feature\s+of\s+product|sourced\s+direct|premium\s+quality|wholesome\s+goodness)\b", re.I)
+PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|feedback|queries|customer|consumer|allergens?|contains?|traces?|facility|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|preservatives?|permitted|emulsifiers?|stabili[sz]ers?|acidity\s+regulators?|starch|class\s+[ivx]+|ins\s*\(?\s*\d|e\s*\(?\s*\d{3}|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight|natural\s+feature\s+of\s+product|sourced\s+direct|premium\s+quality|wholesome\s+goodness)\b", re.I)
 
 
 def _center(line: dict[str, Any]) -> tuple[float, float]:
@@ -348,14 +348,35 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             if ANCHORS["responsible_party_name"].search(text):
                 value = _after_anchor(ANCHORS["responsible_party_name"], text)
                 nearby = _near(anchor, image_lines, 9)
+                company_line = None
                 if not COMPANY.search(value):
                     company_line = next((item for item in nearby if COMPANY.search(item["text"])), None)
                     if company_line: value = company_line["text"]
-                if COMPANY.search(value): candidates["responsible_party_name"].append(_candidate("responsible_party_name", value, [anchor]))
-                address_lines = [item for item in nearby if ADDRESS_HINT.search(item["text"]) and not ANCHORS["responsible_party_name"].search(item["text"])]
+                party_source = company_line or anchor
+                if COMPANY.search(value): candidates["responsible_party_name"].append(_candidate("responsible_party_name", value, [party_source]))
+                # Postal addresses are commonly split into several OCR boxes and
+                # only one line contains an obvious word such as "Road" or a PIN.
+                # Start with a genuine address signal, then retain adjacent lines
+                # in the same printed block instead of requiring every line to
+                # contain a location keyword.
+                address_seeds = [item for item in nearby if item is not party_source and ADDRESS_HINT.search(item["text"]) and not ANCHORS["responsible_party_name"].search(item["text"])]
+                address_lines = []
+                if address_seeds:
+                    seed = min(address_seeds, key=lambda item: abs(_center(item)[1] - _center(party_source)[1]))
+                    seed_x, seed_y = _center(seed)
+                    seed_height = max(16, seed["bbox"][3] - seed["bbox"][1])
+                    for item in image_lines:
+                        item_x, item_y = _center(item)
+                        words = re.findall(r"[A-Za-z]{2,}", item["text"])
+                        competing_label = any(pattern.search(item["text"]) for name, pattern in ANCHORS.items() if name != "responsible_party_name")
+                        if (item not in (anchor, party_source) and not competing_label and not NUTRITION.search(item["text"])
+                                and abs(item_y - seed_y) <= max(90, seed_height * 4.5)
+                                and abs(item_x - seed_x) <= 480 and words):
+                            address_lines.append(item)
                 if address_lines:
                     address_lines.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
-                    candidates["responsible_party_address"].append(_candidate("responsible_party_address", " ".join(item["text"] for item in address_lines[:3]), address_lines[:3]))
+                    address_lines = address_lines[:4]
+                    candidates["responsible_party_address"].append(_candidate("responsible_party_address", " ".join(item["text"] for item in address_lines), address_lines, .02))
             if ANCHORS["consumer_care"].search(text) or EMAIL.search(text) or PHONE.search(text):
                 nearby_text = " ".join(item["text"] for item in _near(anchor, image_lines, 8))
                 email = EMAIL.search(f"{text} {nearby_text}")

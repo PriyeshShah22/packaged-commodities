@@ -436,3 +436,36 @@ def test_unit_price_can_be_reviewably_derived_for_one_base_unit():
     assert fields["unit_sale_price"]["value"] == "₹220.00 per L"
     assert fields["unit_sale_price"]["confidence"] < .7
     assert "Calculated" in fields["unit_sale_price"]["inference"]
+
+
+def test_responsible_party_address_collects_split_postal_block():
+    def box(text, x, y, width=260, height=24, confidence=.96):
+        return {"text": text, "confidence": confidence, "image_id": "BACK", "bbox": [x, y, x + width, y + height]}
+
+    fields = extract_declarations([
+        box("Manufactured by:", 20, 20, 180),
+        box("Example Processed Foods Pvt. Ltd.", 220, 20, 360),
+        box("Khasra No. 41, Food Park", 220, 52, 310),
+        box("Village Rampur, District Sonipat", 220, 82, 350),
+        box("Haryana 131001", 220, 112, 220),
+        box("MRP Rs. 23 inclusive of all taxes", 20, 190, 330),
+    ])
+
+    assert fields["responsible_party_name"]["value"] == "Example Processed Foods Pvt. Ltd."
+    address = fields["responsible_party_address"]["value"]
+    assert "Khasra No. 41" in address
+    assert "District Sonipat" in address
+    assert "131001" in address
+    assert "MRP" not in address
+    assert "Manufactured by" not in address
+
+
+def test_additive_statement_is_not_promoted_to_product_or_brand():
+    fields = extract_declarations([
+        {**line("DARK SOYA", confidence=.98, y=10), "bbox": [20, 10, 500, 80]},
+        {**line("Preservative (INS 211), permitted", confidence=.97, y=90), "bbox": [20, 90, 570, 145]},
+        {**line("class II starch", confidence=.96, y=150), "bbox": [20, 150, 400, 195]},
+    ])
+
+    assert "Preservative" not in fields.get("product_name", {}).get("value", "")
+    assert "Starch" not in fields.get("brand_name", {}).get("value", "")

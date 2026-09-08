@@ -26,6 +26,12 @@ FIELD_LABELS = {
     "unit_sale_price": "unit sale price",
 }
 
+CONDITION_EVIDENCE = {
+    "date_declaration_required": "manufacture_pack_import_date",
+    "may_become_unfit_for_human_consumption": "best_before_or_use_by",
+    "unit_sale_price_required": "unit_sale_price",
+}
+
 
 def _labels(fields: list[str]) -> str:
     return ", ".join(FIELD_LABELS.get(field, field.replace("_", " ")) for field in fields)
@@ -48,8 +54,46 @@ def _all_images_sufficient(request: ValidationRequest) -> bool:
     return bool(request.image_quality) and all(item.status == QualityState.SUFFICIENT for item in request.image_quality)
 
 
+def _context_with_evidence_inferences(rule: dict[str, Any], request: ValidationRequest):
+    """Resolve context only when the package itself supplies strong evidence.
+
+    A visible declaration can establish that a conditional check should be
+    validated without asking the officer to repeat the same fact in a checkbox.
+    Country of origin is likewise inferred only from a confident, labelled OCR
+    field. Missing evidence never creates an inference and therefore remains
+    REVIEW rather than becoming a false pass or failure.
+    """
+    context = request.context.model_copy(deep=True)
+    threshold = float(rule.get("minimum_confidence", 0.75))
+    strong_fields = {
+        item.field: item
+        for item in request.evidence
+        if item.value.strip() and item.confidence >= threshold
+    }
+    inferences: list[str] = []
+
+    if context.origin == "unknown" and "country_of_origin" in strong_fields:
+        country = strong_fields["country_of_origin"].value.strip()
+        if re.search(r"\bindia\b", country, re.I):
+            context.origin = "domestic"
+            inferences.append("domestic origin inferred from the detected country-of-origin declaration")
+        elif re.search(r"[A-Za-z]{3,}", country):
+            context.origin = "imported"
+            inferences.append("imported origin inferred from the detected country-of-origin declaration")
+
+    required_conditions = set(rule.get("applicability", {}).get("required_conditions", []))
+    for condition in required_conditions:
+        field = CONDITION_EVIDENCE.get(condition)
+        if field and field in strong_fields and condition not in context.product_conditions:
+            context.product_conditions.add(condition)
+            inferences.append(f"{condition.replace('_', ' ')} inferred from detected {_labels([field])}")
+
+    return context, inferences
+
+
 def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str, Any]:
-    applicability = evaluate_applicability(rule, request.context)
+    inferred_context, context_inferences = _context_with_evidence_inferences(rule, request)
+    applicability = evaluate_applicability(rule, inferred_context)
     base = {
         "rule_id": rule["rule_id"],
         "rule_version": rule["version"],
@@ -57,6 +101,7 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
         "requirement": rule["requirement"],
         "applicability": applicability.state.value,
         "applicability_reasons": list(applicability.reasons),
+        "context_inferences": context_inferences,
         "evidence": [],
     }
 

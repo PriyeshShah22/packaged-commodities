@@ -85,3 +85,46 @@ def test_invalid_format_is_review_until_coverage_and_quality_are_confirmed():
     assert validate_rule(rule("LMPC-R6-1E-MRP"), uncertain)["outcome"] == "REVIEW"
     confirmed = retail_request(evidence=evidence, field_coverage={"mrp": "complete"}, image_quality=[ImageQuality(image_id="IMG-001", status="sufficient")])
     assert validate_rule(rule("LMPC-R6-1E-MRP"), confirmed)["outcome"] == "FAIL"
+
+
+def test_detected_dates_resolve_conditional_applicability_without_manual_checkbox():
+    request = retail_request(
+        evidence=[
+            EvidenceItem(field="manufacture_pack_import_date", value="24/11/2025", confidence=0.98),
+            EvidenceItem(field="best_before_or_use_by", value="23/02/2027", confidence=0.99),
+        ]
+    )
+    manufacture = validate_rule(rule("LMPC-R6-1D-DATE"), request)
+    use_by = validate_rule(rule("LMPC-R6-1DA-BEST-BEFORE"), request)
+    assert manufacture["outcome"] == "PASS"
+    assert use_by["outcome"] == "PASS"
+    assert manufacture["context_inferences"]
+    assert use_by["context_inferences"]
+
+
+def test_detected_domestic_country_removes_import_only_review():
+    request = retail_request(
+        context=InspectionContext(
+            inspection_mode=InspectionMode.PHYSICAL_PACKAGE,
+            package_context="retail_prepackaged",
+            origin="unknown",
+            sales_context="retail",
+        ),
+        evidence=[EvidenceItem(field="country_of_origin", value="India", confidence=0.97)],
+    )
+    result = validate_rule(rule("LMPC-R6-1B-COUNTRY-OF-ORIGIN"), request)
+    assert result["outcome"] == "NOT_APPLICABLE"
+    assert "domestic origin inferred" in result["context_inferences"][0]
+
+
+def test_low_confidence_country_does_not_change_unknown_origin():
+    request = retail_request(
+        context=InspectionContext(
+            inspection_mode=InspectionMode.PHYSICAL_PACKAGE,
+            package_context="retail_prepackaged",
+            origin="unknown",
+            sales_context="retail",
+        ),
+        evidence=[EvidenceItem(field="country_of_origin", value="India", confidence=0.42)],
+    )
+    assert validate_rule(rule("LMPC-R6-1B-COUNTRY-OF-ORIGIN"), request)["outcome"] == "REVIEW"

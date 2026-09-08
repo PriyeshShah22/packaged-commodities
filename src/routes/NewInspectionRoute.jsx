@@ -66,6 +66,24 @@ function refinedLines(ocrData) {
   return [...unique.values()];
 }
 
+function contextFromDetectedFields(context, fields) {
+  const country = fields?.country_of_origin;
+  if (context.origin !== 'unknown' || !country?.value || Number(country.confidence || 0) < .75) return context;
+  const value = String(country.value).trim();
+  if (!/[A-Za-z]{3,}/.test(value)) return context;
+  return { ...context, origin: /\bindia\b/i.test(value) ? 'domestic' : 'imported' };
+}
+
+function conditionsFromDetectedFields(conditions, fields) {
+  const detected = (field) => Boolean(fields?.[field]?.value) && Number(fields[field].confidence || 0) >= .75;
+  return {
+    ...conditions,
+    date: conditions.date || detected('manufacture_pack_import_date'),
+    perishable: conditions.perishable || detected('best_before_or_use_by'),
+    unitPrice: conditions.unitPrice || detected('unit_sale_price'),
+  };
+}
+
 export default function NewInspectionRoute() {
   const { token, user } = useAuth(); const navigate = useNavigate();
   const [inspectionMode, setInspectionMode] = useState(() => new URLSearchParams(window.location.search).get('mode') === 'bulk' ? 'bulk' : 'grouped');
@@ -91,7 +109,7 @@ export default function NewInspectionRoute() {
         const previousDetectedName = product.ocrData?.fields?.product_name?.value || product.ocrData?.fields?.commodity_name?.value || '';
         const detectedName = ocrData.fields?.product_name?.value || ocrData.fields?.commodity_name?.value || '';
         const productName = !product.details.productName || product.details.productName === previousDetectedName ? detectedName : product.details.productName;
-        return { ocrData, declarations, details: { ...product.details, productId: product.details.productId || ocrData.fields?.barcode?.value || '', productName }, context: data.fields?.country_of_origin?.value && !/india/i.test(data.fields.country_of_origin.value) ? { ...product.context, origin: 'imported' } : product.context, ocrError: '' };
+        return { ocrData, declarations, details: { ...product.details, productId: product.details.productId || ocrData.fields?.barcode?.value || '', productName }, context: contextFromDetectedFields(product.context, ocrData.fields), conditions: conditionsFromDetectedFields(product.conditions, ocrData.fields), ocrError: '' };
       });
       requestAnimationFrame(() => console.debug('[Live OCR] UI updated', { fields: Object.keys(data.fields || {}).length }));
       return true;
