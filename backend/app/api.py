@@ -14,7 +14,7 @@ from app.legal_rules.applicability import evaluate_applicability
 from app.legal_rules.rule_loader import active_rules
 from app.legal_rules.rule_validator import validate_rules
 from app.ocr.extractor import extract_declarations
-from app.ocr.service import run_ocr
+from app.ocr.service import run_ocr, warm_ocr_engine
 from app.reports import build_bulk_report_pdf, build_report_pdf
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password, verify_password
@@ -27,8 +27,14 @@ router = APIRouter()
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
-MAX_OCR_WORKERS = 3
+MAX_OCR_WORKERS = 2
 OCR_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS, thread_name_prefix="packmetrix-ocr")
+LIVE_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="packmetrix-live-ocr")
+
+
+def warm_ocr_workers() -> None:
+    """Warm the dedicated live worker before the API begins accepting scans."""
+    LIVE_OCR_EXECUTOR.submit(warm_ocr_engine).result()
 
 
 def _image_hash(content: bytes) -> str:
@@ -186,7 +192,8 @@ def extract_image_declarations(
     # Reuse bounded worker threads so their thread-local ONNX engines stay warm
     # across Live OCR requests. Creating a pool here used to reload all models
     # for each accepted camera frame.
-    image_results = list(OCR_EXECUTOR.map(process, uploads))
+    executor = LIVE_OCR_EXECUTOR if live else OCR_EXECUTOR
+    image_results = list(executor.map(process, uploads))
     all_lines = [line for image in image_results for line in image["lines"]]
     extraction_started = perf_counter()
     fields = extract_declarations(all_lines)

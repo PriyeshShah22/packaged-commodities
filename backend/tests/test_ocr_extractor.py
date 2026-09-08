@@ -5,7 +5,7 @@ import numpy as np
 
 from app.ocr.extractor import extract_declarations
 from app.api import _grouping_tokens, _token_similarity
-from app.ocr.dot_matrix import _date, _normalize
+from app.ocr.dot_matrix import _date, _normalize, _row_field
 from app.ocr import service
 
 
@@ -30,7 +30,7 @@ def test_live_ocr_uses_fast_primary_pass_and_keeps_full_cache_separate(monkeypat
         return result
 
     monkeypatch.setattr(service, "get_ocr_engine", lambda: engine)
-    monkeypatch.setattr(service, "extract_dot_matrix_lines", lambda *args: dot_calls.append(True) or [])
+    monkeypatch.setattr(service, "extract_dot_matrix_lines", lambda *args, **kwargs: dot_calls.append(True) or [])
     service._ocr_cache.clear()
 
     live_lines, live_quality = service.run_ocr(encoded.tobytes(), "CAM-1", live=True)
@@ -71,6 +71,19 @@ def test_keeps_alternatives_for_conflicting_multi_image_values():
     assert fields["mrp"]["alternatives"]
 
 
+def test_cross_checks_damaged_dot_mrp_against_quantity_and_unit_price():
+    fields = extract_declarations([
+        line("200 g", confidence=.95, y=10),
+        line("MRP ₹639.00 inclusive of all taxes", confidence=.82, y=35),
+        line("Unit sale price ₹1.70 per g", confidence=.91, y=60),
+    ])
+
+    assert fields["net_quantity"]["value"] == "200 g"
+    assert fields["unit_sale_price"]["value"] == "₹1.70 per g"
+    assert fields["mrp"]["value"] == "MRP ₹339.00 inclusive of all taxes"
+    assert "Cross-checked" in fields["mrp"]["inference"]
+
+
 def test_label_anchoring_does_not_map_nutrition_values_to_net_quantity():
     fields = extract_declarations([
         line("SALT"), line("IODISED"), line("NET.WT.200gm"), line("482 KCA"),
@@ -106,10 +119,17 @@ def test_maps_responsible_party_contact_fssai_and_generic_product_separately():
 
 def test_repairs_common_dot_matrix_price_date_and_batch_confusions():
     assert _normalize("mrp", "Bs:220:00")[0] == "MRP ₹220.00 inclusive of all taxes"
+    assert _normalize("mrp", "No:")[0] == ""
     assert _normalize("unit_sale_price", "ES:220FER LT")[0] == "Unit sale price ₹220 per L"
     assert _normalize("batch_number", "2O7F26")[0] == "Batch No S07F26"
     assert _date("97/0672026")[0] == "07/06/2026"
     assert _date("97/06/2026")[0] == "07/06/2026"
+
+
+def test_dot_matrix_labels_survive_spacing_and_minor_ocr_damage():
+    assert _row_field("M R P (incl. taxes)") == "mrp"
+    assert _row_field("BATCH N0.") == "batch_number"
+    assert _row_field("USE BY DATE") == "best_before_or_use_by"
 
 
 def test_does_not_use_phone_number_as_batch_or_cross_map_specialized_dates():
@@ -264,3 +284,64 @@ def test_single_prominent_brand_fragment_is_not_a_complete_product_name():
         line("Net Quantity 500 g", y=100),
     ])
     assert "product_name" not in fields
+
+
+def test_maps_misaligned_price_value_using_spatial_evidence():
+    def box(text, x, y, width=120, height=24, confidence=.95):
+        return {"text": text, "confidence": confidence, "image_id": "CAM-001", "bbox": [x, y, x + width, y + height]}
+
+    fields = extract_declarations([
+        box("M.R.P. (incl. taxes)", 20, 20, 190, 22),
+        box("₹ 349.00", 245, 34, 130, 46),
+        box("Batch K21A", 20, 100, 150, 22),
+    ])
+
+    assert fields["mrp"]["value"] == "MRP ₹349.00 inclusive of all taxes"
+    assert "₹ 349.00" in fields["mrp"]["raw_text"]
+
+
+def test_separates_brand_from_dominant_product_name_without_name_lookup():
+    fields = extract_declarations([
+        {**line("PROV SELECT", confidence=.94, y=10), "bbox": [80, 10, 350, 45]},
+        {**line("CASHEW", confidence=.97, y=65), "bbox": [35, 65, 470, 135]},
+        line("Net Quantity 200 g", y=170),
+    ])
+
+    assert fields["brand_name"]["value"] == "Prov Select"
+    assert fields["product_name"]["value"] == "Cashew"
+
+
+def test_extracts_ingredient_block_and_nutrition_rows():
+    fields = extract_declarations([
+        line("Ingredients: Cashew, edible vegetable oil,", y=10),
+        line("iodised salt and spices", y=35),
+        line("Nutritional Information", y=80),
+        line("Energy 482 kcal", y=105),
+        line("Protein 3.30 g", y=130),
+        line("Total Fat 50.01 g", y=155),
+        line("MRP Rs. 120", y=210),
+    ])
+
+    assert "Cashew" in fields["ingredients"]["value"]
+    assert "iodised salt" in fields["ingredients"]["value"]
+    assert "Energy 482 kcal" in fields["nutrition_information"]["value"]
+    assert "Protein 3.30 g" in fields["nutrition_information"]["value"]
+
+
+def test_allergen_warning_is_never_promoted_to_brand():
+    fields = extract_declarations([
+        {**line("ALLERGENS: CONTAINS TRACES OF OTHER NUTS", confidence=.98, y=10), "bbox": [10, 10, 700, 70]},
+        {**line("CASHEW", confidence=.96, y=90), "bbox": [80, 90, 520, 155]},
+    ])
+
+    assert fields.get("brand_name", {}).get("value") != "Allergens: Contains Traces Of Other Nuts"
+
+
+def test_semantic_consistency_rejects_impossible_unit_price_digit_join():
+    fields = extract_declarations([
+        line("MRP ₹2288", confidence=.9, y=10),
+        line("Unit sale price ₹2607488 per g", confidence=.95, y=40),
+    ])
+
+    assert fields["mrp"]["confidence"] < .8
+    assert "unit_sale_price" not in fields

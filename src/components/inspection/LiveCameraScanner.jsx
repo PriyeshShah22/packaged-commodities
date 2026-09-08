@@ -22,6 +22,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   const [active, setActive] = useState(false);
   const [continuous, setContinuous] = useState(false);
   const [error, setError] = useState('');
+  const [captureStatus, setCaptureStatus] = useState('');
 
   const stop = () => {
     clearInterval(intervalRef.current);
@@ -75,6 +76,8 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   };
 
   const capture = async (automatic = false) => {
+    // Live mode samples one temporary frame at a time. It never builds a photo
+    // queue, so repeated copies of the same package are not shown or stored.
     if (!videoRef.current?.videoWidth || busyRef.current || captureInFlightRef.current) return;
     const video = videoRef.current;
     let acceptedCandidate = null;
@@ -128,7 +131,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
       // processed. Rotation produces a novel signature and is accepted once it
       // settles, so declarations accumulate without OCR on every video frame.
       const stable = motion <= 12;
-      const steadyHandFallback = candidateAge >= 1200 && motion <= 20 && detail >= 8;
+      const steadyHandFallback = candidateAge >= 650 && motion <= 20 && detail >= 8;
       if (detail < 5.5 || clippedRatio > .55 || (!stable && !steadyHandFallback)) return;
       // A matching side is accepted again only if its image detail improved
       // materially; otherwise it would repeat the same expensive OCR request.
@@ -144,7 +147,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     const source = automatic
       ? { x: video.videoWidth * .12, y: video.videoHeight * .10, width: video.videoWidth * .76, height: video.videoHeight * .80 }
       : { x: 0, y: 0, width: video.videoWidth, height: video.videoHeight };
-    const maxDimension = automatic ? 1400 : 1800;
+    // Automatic frames prioritize a fast OCR response. 1280px remains large
+    // enough for the stamped MRP/date pass while reducing pixels sent through
+    // the detector. Manual evidence capture keeps the higher-quality path.
+    const maxDimension = automatic ? 1280 : 1800;
     const scale = Math.min(1, maxDimension / Math.max(source.width, source.height));
     canvas.width = Math.round(source.width * scale);
     canvas.height = Math.round(source.height * scale);
@@ -153,10 +159,12 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
 
     captureInFlightRef.current = true;
     try {
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', automatic ? 0.82 : 0.9));
       if (blob) {
         console.debug('[Live OCR] image captured', { bytes: blob.size, width: canvas.width, height: canvas.height });
-        const succeeded = await onCaptureRef.current(new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' }), automatic);
+        const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
+        setCaptureStatus(automatic ? 'Reading this live frame…' : 'Reading captured evidence…');
+        const succeeded = await onCaptureRef.current(file, automatic);
         if (automatic && succeeded !== false && acceptedCandidate) {
           acceptedFramesRef.current = [
             ...acceptedFramesRef.current.filter((accepted) => {
@@ -166,6 +174,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
             acceptedCandidate,
           ].slice(-6);
         }
+        setCaptureStatus(succeeded === false ? 'No reliable text in that frame — keep scanning.' : 'Live text retained — show another side when ready.');
       }
     } finally {
       captureInFlightRef.current = false;
@@ -188,6 +197,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
 
   const extractedFields = [
     ['Product', ['product_name', 'commodity_name']],
+    ['Brand', ['brand_name']],
     ['Manufacturer', ['responsible_party_name']],
     ['Net quantity', ['net_quantity']],
     ['MRP', ['mrp']],
@@ -197,12 +207,15 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     ['Country of origin', ['country_of_origin']],
     ['Batch / lot', ['batch_number']],
     ['Barcode / GTIN', ['barcode']],
+    ['Ingredients', ['ingredients']],
+    ['Nutrition', ['nutrition_information']],
   ].map(([label, fields]) => ({
     label,
     evidence: fields.map((field) => ocrData?.fields?.[field]).find(Boolean),
   })).filter((item) => item.evidence);
 
   const detectedCount = extractedFields.length;
+  const rawLines = (ocrData?.images || []).flatMap((image) => image.lines || []).filter((line) => line?.text);
 
   return (
     <div className="grid lg:grid-cols-2 gap-4 items-stretch">
@@ -289,13 +302,12 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
               {/* Primary Capture Button */}
               <button
                 onClick={() => capture(false)}
-                disabled={busy}
-                className="flex-1 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-950 font-bold py-2.5 px-4 rounded-xl text-sm flex items-center justify-center gap-2 shadow-lg transition-all duration-200 disabled:opacity-60 cursor-pointer"
+                className="flex-1 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-950 font-bold py-2.5 px-4 rounded-xl text-sm flex items-center justify-center gap-2 shadow-lg transition-all duration-200 cursor-pointer"
               >
                 {busy ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
-                    <span>Extracting Declarations…</span>
+                    <span>Capture Another Panel</span>
                   </>
                 ) : (
                   <>
@@ -353,6 +365,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
           </div>
 
           <div className="mt-3.5 space-y-2 max-h-[420px] overflow-y-auto pr-1">
+            {captureStatus && <p className="rounded-lg bg-sky-950/70 border border-sky-800 px-3 py-2 text-xs text-sky-200">{captureStatus}</p>}
             {!extractedFields.length && <p className="text-sm text-slate-400 leading-relaxed p-3">Point the camera at a declaration panel and choose Live OCR. Detected package values will appear here as each side is scanned.</p>}
             {extractedFields.map(({ label, evidence }) => (
               <div
@@ -363,6 +376,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
                 <p className="text-sm text-white mt-1 break-words">{evidence.value}</p>
               </div>
             ))}
+            {rawLines.length > 0 && <details className="rounded-xl border border-slate-800 bg-slate-900/40 p-3"><summary className="cursor-pointer text-[11px] font-bold uppercase tracking-wide text-sky-300">All retained OCR text ({rawLines.length})</summary><div className="mt-2 space-y-1 font-mono text-[11px] text-slate-300">{rawLines.map((line, index) => <p key={`${line.text}-${index}`}><span className="text-slate-600 mr-2">{String(index + 1).padStart(2, '0')}</span>{line.text}<span className="ml-2 text-emerald-500">{Math.round((line.confidence || 0) * 100)}%</span></p>)}</div></details>}
           </div>
         </div>
 

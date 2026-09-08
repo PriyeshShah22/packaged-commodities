@@ -22,8 +22,33 @@ LEGAL_SIGNAL = ("net", "mrp", "mfg", "mfd", "batch", "fssai", "consumer", "manuf
 def get_ocr_engine() -> RapidOCR:
     """Return one engine per worker thread so independent panels can run safely."""
     if not getattr(_engine_state, "engine", None):
-        _engine_state.engine = RapidOCR(params={"Global.text_score": 0.45, "Global.max_side_len": 2400})
+        _engine_state.engine = RapidOCR(params={
+            "Global.text_score": 0.45,
+            "Global.max_side_len": 2400,
+            # Let ONNX reuse its CPU arena and avoid oversubscribing every one
+            # of the host's logical cores for small recognition crops.
+            "EngineConfig.onnxruntime.intra_op_num_threads": 6,
+            "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+            "EngineConfig.onnxruntime.enable_cpu_mem_arena": True,
+        })
     return _engine_state.engine
+
+
+def warm_ocr_engine() -> None:
+    """Initialize models and realistic dynamic tensor shapes before live traffic."""
+    canvas = np.full((720, 1200, 3), 255, dtype=np.uint8)
+    warm_lines = (
+        "PACKAGED COMMODITY DECLARATION",
+        "NET QUANTITY 500 g",
+        "MRP Rs. 220.00 INCLUSIVE OF ALL TAXES",
+        "UNIT SALE PRICE Rs. 0.44 PER g",
+        "BATCH A123  MFG 07/2026  USE BY 06/2027",
+        "MANUFACTURED BY SAMPLE FOODS PRIVATE LIMITED",
+        "CONSUMER CARE 9876543210 care@example.com",
+    )
+    for index, value in enumerate(warm_lines):
+        cv2.putText(canvas, value, (30, 80 + index * 82), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2, cv2.LINE_AA)
+    get_ocr_engine()(canvas, use_det=True, use_cls=True, use_rec=True)
 
 
 def _result_score(result) -> float:
@@ -71,12 +96,18 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
     if image is None:
         raise ValueError("The uploaded file could not be decoded as an image.")
 
+    source_image = image
+    source_gray = cv2.cvtColor(source_image, cv2.COLOR_BGR2GRAY)
+    source_blur_variance = float(cv2.Laplacian(source_gray, cv2.CV_64F).var())
     height, width = image.shape[:2]
     # Live capture is progressive: use a bounded, high-enough resolution for the
     # first response instead of making an inspector wait for every expensive
     # evidence enhancement. Uploaded evidence continues through the full path.
-    if live and max(height, width) > 1600:
-        scale = 1600 / max(height, width)
+    if live and max(height, width) > 1200:
+        # This is the fast whole-frame pass. Faint stamp rows are read from the
+        # untouched source below, so increasing this further only delays live
+        # feedback without reliably improving dot-matrix digits.
+        scale = 1200 / max(height, width)
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -129,8 +160,12 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
     # Keep the naturally oriented pixels for the dot-matrix pass. Cubic
     # upscaling helps ordinary small print but can merge the separated dots
     # in inkjet-stamped dates into misleading solid glyphs.
-    dot_matrix_image = image
+    # Preserve original camera pixels for faint dot-matrix characters. The
+    # normal live pass stays bounded at 1200 px for speed; only the small price
+    # sticker crop is read from the high-resolution source below.
+    dot_matrix_image = cv2.rotate(source_image, cv2.ROTATE_90_COUNTERCLOCKWISE) if rotation == 270 else source_image
     dot_matrix_result = result
+    coordinate_scale = dot_matrix_image.shape[1] / max(1, image.shape[1])
 
     # Small phone frames are upscaled and gently sharpened only when the first
     # pass is weak, avoiding a routine second full-model invocation.
@@ -146,18 +181,19 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
             result = enhanced_result
             quality["enhanced_for_small_text"] = True
 
-    detected_text = " ".join(str(text).lower() for text in (dot_matrix_result.txts or []))
-    has_stamped_declaration = any(
-        signal in detected_text
-        for signal in ("mrp", "batch", "mfg", "mfd", "date of manufacture", "use by", "packed on")
-    )
-    # A clear live frame with a stamped declaration still gets targeted row
-    # recognition so price/date accuracy is preserved. Ordinary/front frames
-    # return after primary OCR instead of paying this serial cost unnecessarily.
+    # On a clear live frame, inspect detected boxes for faint stamped rows even
+    # when primary OCR slightly damages the MRP/date label. The targeted helper
+    # returns immediately when the frame has no price-sticker structure.
     stamped_started = perf_counter()
     dot_matrix_lines = (
-        extract_dot_matrix_lines(dot_matrix_image, dot_matrix_result, image_id, engine)
-        if not live or (blur_variance >= 100 and has_stamped_declaration)
+        extract_dot_matrix_lines(
+            dot_matrix_image,
+            dot_matrix_result,
+            image_id,
+            engine,
+            coordinate_scale=coordinate_scale,
+        )
+        if not live or max(source_blur_variance, blur_variance) >= 100
         else []
     )
     quality["timing_ms"]["stamped_fields"] = round((perf_counter() - stamped_started) * 1000, 1)

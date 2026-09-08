@@ -30,9 +30,13 @@ FSSAI = re.compile(r"\b\d{14}\b")
 BARCODE = re.compile(r"\b\d{8,14}\b")
 COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|industries|enterprises|llp)\b", re.I)
 ADDRESS_HINT = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|india|pincode|pin|gujarat|maharashtra|delhi|mumbai|kolkata|chennai|bengaluru|bangalore|plot|sector|chamber|village|taluka)\b", re.I)
-NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?)\b", re.I)
+NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?|allergens?|contains?|traces?)\b", re.I)
+INGREDIENTS_ANCHOR = re.compile(r"\bingredients?\b\s*[:.-]?", re.I)
+NUTRITION_HEADER = re.compile(r"\b(?:nutrition(?:al)?\s+(?:facts?|information)|amount\s+per\s+serving)\b", re.I)
+NUTRIENT_LINE = re.compile(r"\b(?:energy|calories?|kcal|protein|total\s+fat|saturated\s+fat|trans\s+fat|cholesterol|sod+i+um|carbohydrates?|dietary\s+fib(?:re|er)|total\s+sugars?|added\s+sugars?|serving\s+size)\b", re.I)
+SECTION_BOUNDARY = re.compile(r"\b(?:allergen|storage|consumer\s+care|manufactured|marketed|packed|net\s+(?:quantity|weight)|m\s*\.?\s*r\s*\.?\s*p|batch|fssai)\b", re.I)
 GENERIC_LABEL = re.compile(r"\b(?:net|mrp|batch|mfg|mfd|expiry|use by|consumer|manufactured|marketed|fssai|lic[\s.]*no|quantity|price|date|address|qr\s*code|follow\s+us|website|incl(?:usive)?|tax(?:es)?)\b", re.I)
-PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|customer|consumer|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
+PRODUCT_REJECT = re.compile(r"\b(?:www|https?|email|phone|mobile|contact|feedback|queries|customer|consumer|allergens?|contains?|traces?|facility|fssai|issai|licen[cs]e|barcode|gtin|batch|lot|manufactured|marketed|packed|imported|address|road|street|line|lane|pincode|pin|regn|registration|gpcb|pwr|potential\s+issue|needs?\s+review|non[ -]?compliant|per\s+(?:lit|litre|kg|g|ml)|net\s*weight)\b", re.I)
 
 
 def _center(line: dict[str, Any]) -> tuple[float, float]:
@@ -88,7 +92,7 @@ def _evidence_strength(field: str, item: dict[str, Any]) -> float:
         score += min(digits, 14) * .012
     elif field in {"manufacture_pack_import_date", "best_before_or_use_by", "batch_number"}:
         score += min(len(re.sub(r"\s", "", value)), 14) * .008
-    elif field in {"product_name", "commodity_name", "responsible_party_name", "responsible_party_address"}:
+    elif field in {"brand_name", "product_name", "commodity_name", "responsible_party_name", "responsible_party_address", "ingredients", "nutrition_information"}:
         score += min(words, 7) * .018 + min(len(value), 70) * .001
     return score
 
@@ -215,20 +219,23 @@ def _extract_labeled(
             if close_vertical and close_horizontal:
                 adjacent.append(item)
 
-        variants = [(anchor["text"], [anchor])]
-        variants.extend((f'{anchor["text"]} {item["text"]}', [anchor, item]) for item in same_row + adjacent)
+        variants = [(anchor["text"], [anchor], 0.0)]
+        # Evaluate every spatially close label/value pair. OCR commonly emits a
+        # small "MRP" label and a larger price as separate boxes, sometimes on
+        # slightly different baselines. Ranking all pairs is more reliable than
+        # assuming the value is the first OCR line after the label.
+        for item in same_row + adjacent:
+            item_x, item_y = _center(item)
+            row_delta = abs(item_y - anchor_y) / max(anchor_height, 1)
+            horizontal_gap = max(0, item_x - anchor_x) / max(anchor_width, 1)
+            spatial_penalty = min(.12, row_delta * .018 + horizontal_gap * .006)
+            variants.append((f'{anchor["text"]} {item["text"]}', [anchor, item], spatial_penalty))
         if same_row:
-            variants.append((" ".join([anchor["text"], *(item["text"] for item in same_row[:3])]), [anchor, *same_row[:3]]))
-        extracted = [(extractor(text), used) for text, used in variants]
-        extracted = [(value, used) for value, used in extracted if value]
-        if field == "mrp" and extracted:
-            value, used = max(extracted, key=lambda candidate: (float(re.search(r"\d+(?:\.\d+)?", candidate[0]).group(0)) >= 1, bool(re.search(r"\.\d{2}\b", candidate[0])), -len(candidate[1])))
-        elif extracted:
-            value, used = extracted[0]
-        else:
-            value, used = "", []
-        if value:
-            found.append(_candidate(field, value, used, penalty))
+            variants.append((" ".join([anchor["text"], *(item["text"] for item in same_row[:3])]), [anchor, *same_row[:3]], .015))
+        for text, used, spatial_penalty in variants:
+            value = extractor(text)
+            if value:
+                found.append(_candidate(field, value, used, penalty + spatial_penalty))
     return found
 
 
@@ -253,12 +260,24 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
         if text:
             by_image.setdefault(line["image_id"], []).append({**line, "text": text})
 
-    candidates: dict[str, list[dict[str, Any]]] = {field: [] for field in (*ANCHORS, "responsible_party_address", "consumer_phone", "consumer_email", "barcode", "product_name")}
+    candidates: dict[str, list[dict[str, Any]]] = {field: [] for field in (*ANCHORS, "responsible_party_address", "consumer_phone", "consumer_email", "barcode", "brand_name", "product_name", "ingredients", "nutrition_information")}
     for image_lines in by_image.values():
         candidates["net_quantity"] += _extract_labeled("net_quantity", image_lines, _normalize_quantity)
+        heights = [max(1, item["bbox"][3] - item["bbox"][1]) for item in image_lines if item.get("bbox")]
+        median_height = sorted(heights)[len(heights) // 2] if heights else 1
+        for item in image_lines:
+            quantity = _normalize_quantity(item["text"])
+            box = item.get("bbox") or [0, 0, 0, 0]
+            if quantity and QUANTITY.fullmatch(item["text"].strip()) and box[3] - box[1] >= median_height:
+                # A standalone, visually prominent quantity is common on the
+                # white stamp panel even when its faint "Net Weight" caption is
+                # missed. Keep a modest penalty so an explicit label wins.
+                candidates["net_quantity"].append(_candidate("net_quantity", quantity, [item], .12))
 
         def mrp_value(text: str) -> str:
             remainder = _after_anchor(ANCHORS["mrp"], text)
+            if re.search(r"(?:[0-3]?\d[./-]){2}\d{2,4}|(?:19|20)\d{2}", remainder):
+                return ""
             amount = _normalize_price(remainder)
             if not amount:
                 return ""
@@ -273,9 +292,12 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
                     candidates["mrp"].append(_candidate("mrp", f"MRP ₹{amount}{taxes}", [item], .08))
 
         def unit_price(text: str) -> str:
-            price = _normalize_price(_after_anchor(ANCHORS["unit_sale_price"], text))
-            per = re.search(r"(?:per|/)\s*(?:g|kg|ml|l|m|cm|unit|number)\b", text, re.I)
-            return f"₹{price} {per.group(0)}" if price and per else ""
+            remainder = _after_anchor(ANCHORS["unit_sale_price"], text)
+            if re.search(r"(?:[0-3]?\d[./-]){2}\d{2,4}|(?:19|20)\d{2}", remainder):
+                return ""
+            price = _normalize_price(remainder)
+            per = re.search(r"(?:per|/)\s*(g|kg|ml|l|m|cm|unit|number)\b", text, re.I)
+            return f"₹{price} per {per.group(1)}" if price and per else ""
         candidates["unit_sale_price"] += _extract_labeled("unit_sale_price", image_lines, unit_price)
 
         for field in ("manufacture_pack_import_date", "best_before_or_use_by"):
@@ -316,6 +338,63 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             barcode = BARCODE.fullmatch(re.sub(r"\s", "", text))
             if barcode and not FSSAI.fullmatch(barcode.group(0)) and not PHONE.fullmatch(barcode.group(0)): candidates["barcode"].append(_candidate("barcode", barcode.group(0), [anchor], .05))
 
+        # Ingredient text is a content block, not a single label/value line.
+        # Collect nearby following lines until another package section begins.
+        ordered_lines = sorted(image_lines, key=lambda item: (_center(item)[1], _center(item)[0]))
+        for anchor in ordered_lines:
+            if not INGREDIENTS_ANCHOR.search(anchor["text"]):
+                continue
+            anchor_x, anchor_y = _center(anchor)
+            anchor_height = max(16, anchor["bbox"][3] - anchor["bbox"][1])
+            parts = []
+            remainder = INGREDIENTS_ANCHOR.sub("", anchor["text"], count=1).strip(" :-,.;")
+            if len(re.findall(r"[A-Za-z]", remainder)) >= 3:
+                parts.append({**anchor, "text": remainder})
+            for item in ordered_lines:
+                if item is anchor:
+                    continue
+                item_x, item_y = _center(item)
+                if item_y <= anchor_y or item_y - anchor_y > max(300, anchor_height * 10):
+                    continue
+                item_box = item.get("bbox") or [0, 0, 0, 0]
+                anchor_box = anchor.get("bbox") or [0, 0, 0, 0]
+                same_column = item_box[0] <= anchor_box[2] + 80 and item_box[2] >= anchor_box[0] - 80
+                if not same_column or abs(item_x - anchor_x) > 420:
+                    continue
+                if NUTRITION_HEADER.search(item["text"]) or SECTION_BOUNDARY.search(item["text"]):
+                    break
+                if float(item.get("confidence", 0)) >= .6 and len(re.findall(r"[A-Za-z]", item["text"])) >= 3:
+                    parts.append(item)
+                if len(parts) >= 6:
+                    break
+            if parts:
+                value = re.sub(r"\s+", " ", " ".join(item["text"].strip(" ,;") for item in parts)).strip(" ,;")
+                candidates["ingredients"].append(_candidate("ingredients", value, [anchor, *parts], .03))
+
+        nutrition_rows = []
+        nutrition_sources = []
+        for label in ordered_lines:
+            if not NUTRIENT_LINE.search(label["text"]) or INGREDIENTS_ANCHOR.search(label["text"]):
+                continue
+            if re.match(r"\s*\d", label["text"]):
+                continue
+            if len(label["text"]) > 45 and not re.match(r"\s*(?:serving\s+size|total\s+carbohydrate)", label["text"], re.I):
+                continue
+            label_x, label_y = _center(label)
+            label_height = max(16, label["bbox"][3] - label["bbox"][1])
+            values = [item for item in ordered_lines if item is not label
+                      and (item.get("bbox") or [0, 0, 0, 0])[0] >= label["bbox"][2] - 5
+                      and abs(_center(item)[1] - label_y) <= max(8, label_height * .4)
+                      and _center(item)[0] - label_x <= 360
+                      and re.search(r"\d", item["text"])]
+            values.sort(key=lambda item: _center(item)[0])
+            row_sources = [label, *values[:2]]
+            nutrition_rows.append(" ".join(item["text"].strip(" ;") for item in row_sources))
+            nutrition_sources.extend(row_sources)
+        if nutrition_rows:
+            value = "; ".join(dict.fromkeys(nutrition_rows))
+            candidates["nutrition_information"].append(_candidate("nutrition_information", value, nutrition_sources, .04))
+
         # Product display name: prominent non-legal, non-nutrition text. It is kept
         # separate from the statutory common/generic commodity declaration.
         display = []
@@ -333,30 +412,115 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             if _valid_product_text(text) and height >= max(24, median_height * prominence_ratio):
                 # Display names tend to be large, wide text on a front panel.
                 # Confidence breaks ties, but cannot make a URL or identifier a name.
-                display.append((height * 2.2 + min(width, 900) * .03 + item["confidence"] * 20, item))
+                if float(item.get("confidence", 0)) >= .65:
+                    display.append((height * 1.2 + min(width, 900) * .12 + item["confidence"] * 20, item))
         if display:
             _, best = max(display, key=lambda pair: pair[0])
             _, best_y = _center(best)
             best_height = max(16, (best.get("bbox") or [0, 0, 0, 0])[3] - (best.get("bbox") or [0, 0, 0, 0])[1])
             best_key = re.sub(r"[^a-z0-9]", "", _clean_product_text(best["text"]).lower())
+            # A product descriptor is normally the dominant display line. A
+            # smaller line directly beneath it may be a variant; a distinct line
+            # above it is retained separately as brand evidence.
             companion = next((item for _, item in sorted(display, key=lambda pair: pair[0], reverse=True)
-                              if item is not best and abs(_center(item)[1] - best_y) <= best_height * 2.8
+                              if item is not best and 0 < _center(item)[1] - best_y <= best_height * 2.8
+                              and ((item.get("bbox") or [0, 0, 0, 0])[3] - (item.get("bbox") or [0, 0, 0, 0])[1]) >= best_height * .35
                               and (candidate_key := re.sub(r"[^a-z0-9]", "", _clean_product_text(item["text"]).lower()))
-                              and candidate_key not in best_key and best_key not in candidate_key
-                              and not re.search(r"\b(?:ingredients?|nutrition|servings?)\b", item["text"], re.I)), None)
+                              and candidate_key not in best_key and best_key not in candidate_key), None)
+            brand = next((item for _, item in sorted(display, key=lambda pair: _center(pair[1])[1])
+                          if item is not best and item is not companion and _center(item)[1] < best_y
+                          and best_y - _center(item)[1] <= best_height * 5), None)
+            if brand:
+                brand_x, brand_y = _center(brand)
+                brand_height = max(14, brand["bbox"][3] - brand["bbox"][1])
+                brand_companion = next((item for item in ordered_lines
+                                        if item not in (best, companion, brand)
+                                        and 0 < _center(item)[1] - brand_y <= brand_height * 1.8
+                                        and abs(_center(item)[0] - brand_x) <= max(120, brand["bbox"][2] - brand["bbox"][0])
+                                        and float(item.get("confidence", 0)) >= .65
+                                        and 2 <= len(re.findall(r"[A-Za-z]", item["text"])) <= 20
+                                        and not GENERIC_LABEL.search(item["text"])
+                                        and not NUTRITION.search(item["text"])), None)
+                brand_parts = [brand] + ([brand_companion] if brand_companion else [])
+                brand_parts.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
+                brand_value = " ".join(_clean_product_text(item["text"]) for item in brand_parts)
+                candidates["brand_name"].append(_candidate("brand_name", brand_value.title(), brand_parts, .04))
+            elif not companion:
+                candidates["brand_name"].append(_candidate("brand_name", _clean_product_text(best["text"]).title(), [best], .07))
             parts = [best] + ([companion] if companion else [])
             parts.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
             value = " ".join(_clean_product_text(item["text"]) for item in parts)
             # A lone prominent word is normally brand evidence, not sufficient
             # evidence of the full product identity. Keep it separate so a later
             # camera angle cannot replace a complete product name with one word.
-            if companion or len(value.split()) >= 2:
-                candidates["product_name"].append(_candidate("product_name", value.title(), parts, .05))
+            if brand or companion or len(value.split()) >= 2:
+                candidates["product_name"].append(_candidate("product_name", value.title(), parts, .05 if companion else .08))
 
     fields: dict[str, dict[str, Any]] = {}
     for field, items in candidates.items():
         ranked = _dedupe_rank(items)
+        if field == "brand_name":
+            ranked = [item for item in ranked if _valid_product_text(item["value"])]
         if ranked:
             ranked.sort(key=lambda item: _evidence_strength(field, item), reverse=True)
             fields[field] = {**ranked[0], "alternatives": ranked[1:4]}
+
+    def price_amount(field: str) -> float | None:
+        match = re.search(r"\d+(?:\.\d+)?", str(fields.get(field, {}).get("value", "")))
+        return float(match.group(0)) if match else None
+
+    mrp_amount = price_amount("mrp")
+    unit_amount = price_amount("unit_sale_price")
+    quantity_match = re.search(r"(\d+(?:\.\d+)?)\s*(kg|g|ml|L)\b", str(fields.get("net_quantity", {}).get("value", "")), re.I)
+    unit_match = re.search(r"per\s*(kg|g|ml|L)\b", str(fields.get("unit_sale_price", {}).get("value", "")), re.I)
+    if mrp_amount and unit_amount and quantity_match and unit_match:
+        quantity = float(quantity_match.group(1))
+        quantity_unit = quantity_match.group(2).lower()
+        unit = unit_match.group(1).lower()
+        if quantity_unit == unit:
+            expected = quantity * unit_amount
+        elif quantity_unit == "kg" and unit == "g":
+            expected = quantity * 1000 * unit_amount
+        elif quantity_unit == "l" and unit == "ml":
+            expected = quantity * 1000 * unit_amount
+        else:
+            expected = 0
+        if expected > 0 and abs(mrp_amount - expected) / expected > .25:
+            raw_digits = re.sub(r"\D", "", fields["mrp"].get("raw_text", ""))
+            bases = [mrp_amount]
+            if "." not in fields["mrp"].get("raw_text", "") and len(raw_digits) >= 3:
+                bases.append(int(raw_digits) / 100)
+            repairs = []
+            for base in bases:
+                rendered = f"{base:.2f}"
+                tail = rendered[1:] if len(rendered.split(".", 1)[0]) >= 2 else rendered
+                for leading in range(1, 10):
+                    candidate = float(f"{leading}{tail}")
+                    repairs.append(candidate)
+            repaired = min(repairs, key=lambda value: abs(value - expected), default=mrp_amount)
+            if abs(repaired - expected) / expected <= .05:
+                taxes = " inclusive of all taxes" if "inclusive" in fields["mrp"]["value"].lower() else ""
+                fields["mrp"] = {
+                    **fields["mrp"],
+                    "value": f"MRP ₹{repaired:.2f}{taxes}",
+                    "confidence": round(max(.5, min(
+                        fields["mrp"]["confidence"],
+                        fields["net_quantity"]["confidence"],
+                        fields["unit_sale_price"]["confidence"],
+                    ) - .08), 4),
+                    "inference": "Cross-checked against net quantity and declared unit sale price",
+                }
+                mrp_amount = repaired
+    if mrp_amount and mrp_amount >= 1000 and "." not in fields["mrp"]["value"]:
+        # A long integer MRP is frequently a dropped decimal or joined OCR row.
+        # Keep it visible for review, but never present it as high-confidence.
+        fields["mrp"]["confidence"] = min(fields["mrp"]["confidence"], .69)
+    if mrp_amount and unit_amount and unit_amount > max(100000, mrp_amount * 10):
+        alternatives = [item for item in fields["unit_sale_price"].get("alternatives", [])
+                        if (match := re.search(r"\d+(?:\.\d+)?", item["value"]))
+                        and float(match.group(0)) <= max(100000, mrp_amount * 10)]
+        if alternatives:
+            fields["unit_sale_price"] = {**alternatives[0], "alternatives": alternatives[1:4]}
+        else:
+            fields.pop("unit_sale_price", None)
     return fields

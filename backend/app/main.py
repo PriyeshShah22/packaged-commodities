@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import models  # noqa: F401 - registers SQLAlchemy metadata
-from app.api import router
+from app.api import router, warm_ocr_workers
 from app.core.config import get_settings
 from app.core.database import create_database_tables
 from app.core.database import SessionLocal
@@ -20,6 +20,7 @@ settings = get_settings()
 async def lifespan(_: FastAPI):
     create_database_tables()
     seed_local_accounts()
+    warm_ocr_workers()
     yield
 
 

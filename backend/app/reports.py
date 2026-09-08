@@ -77,7 +77,9 @@ def _summary(report, styles):
 
 def _details(report, styles):
     d, f = report.get("details") or {}, report.get("declarations") or {}
-    entries = [("Product name", d.get("productName")), ("GTIN / barcode", f.get("barcode") or d.get("productId")), ("Common name", f.get("commodity_name")), ("Net quantity", f.get("net_quantity")), ("Manufacturer / packer / importer", f.get("responsible_party_name")), ("MRP", f.get("mrp")), ("Responsible-party address", f.get("responsible_party_address")), ("Batch / lot", f.get("batch_number")), ("Manufacture / pack date", f.get("manufacture_pack_import_date")), ("Best before / use by", f.get("best_before_or_use_by")), ("Consumer-care phone", f.get("consumer_phone")), ("Consumer-care email", f.get("consumer_email")), ("Country of origin", f.get("country_of_origin")), ("FSSAI licence", f.get("fssai_license"))]
+    entries = [("Product name", d.get("productName")), ("Brand name", f.get("brand_name")), ("GTIN / barcode", f.get("barcode") or d.get("productId")), ("Common name", f.get("commodity_name")), ("Net quantity", f.get("net_quantity")), ("Manufacturer / packer / importer", f.get("responsible_party_name")), ("MRP", f.get("mrp")), ("Responsible-party address", f.get("responsible_party_address")), ("Batch / lot", f.get("batch_number")), ("Manufacture / pack date", f.get("manufacture_pack_import_date")), ("Best before / use by", f.get("best_before_or_use_by")), ("Consumer-care phone", f.get("consumer_phone")), ("Consumer-care email", f.get("consumer_email")), ("Country of origin", f.get("country_of_origin")), ("FSSAI licence", f.get("fssai_license"))]
+    if len(entries) % 2:
+        entries.append(("", ""))
     rows = []
     for i in range(0, len(entries), 2):
         left, right = entries[i:i + 2]
@@ -85,6 +87,28 @@ def _details(report, styles):
     table = Table(rows, colWidths=[34 * mm, 51 * mm, 34 * mm, 51 * mm])
     table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .35, BORDER), ("BACKGROUND", (0, 0), (0, -1), PALE), ("BACKGROUND", (2, 0), (2, -1), PALE), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 6)]))
     return table
+
+
+def _composition(report, styles):
+    fields = report.get("declarations") or {}
+    data = [
+        [Paragraph("INGREDIENTS", styles["PMLabel"]), Paragraph(_safe(fields.get("ingredients")), styles["PMBody"])],
+        [Paragraph("NUTRITION INFORMATION", styles["PMLabel"]), Paragraph(_safe(fields.get("nutrition_information")), styles["PMBody"])],
+    ]
+    table = Table(data, colWidths=[42 * mm, 128 * mm])
+    table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .35, BORDER), ("BACKGROUND", (0, 0), (0, -1), PALE), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 7)]))
+    return table
+
+
+def _transcript(report, styles):
+    lines = report.get("ocrLines") or []
+    if not lines:
+        return [Paragraph("No OCR transcript was retained for this report.", styles["PMSmall"])]
+    result = []
+    for index, line in enumerate(lines, 1):
+        confidence = round(float(line.get("confidence") or 0) * 100)
+        result.append(Paragraph(f"<b>{index:02d}</b> &nbsp; {_safe(line.get('text'))} &nbsp; <font color='#047857'>{confidence}%</font>", styles["PMSmall"]))
+    return result
 
 
 def _finding(item, styles):
@@ -113,11 +137,11 @@ def _story(report, styles, title=True):
     if title: result += [Paragraph("OFFICIAL INSPECTION RECORD", styles["PMKicker"]), Paragraph("Packaged Commodity Inspection Report", styles["PMTitle"])]
     meta = Table([[Paragraph(f"<b>Report ID</b><br/>{_safe(report.get('id'))}<br/><b>Inspection ID</b><br/>{_safe(report.get('inspectionId') or report.get('id'))}", styles["PMMeta"]), Paragraph(f"<b>Batch ID</b><br/>{_safe(report.get('batchId'), 'Single inspection')}<br/><b>Inspection date and time</b><br/>{_safe(report.get('date'))}", styles["PMMeta"]), Paragraph(f"<b>Inspector</b><br/>{_safe(report.get('inspectorName'))}<br/><b>Rule set</b><br/>{_safe(report.get('ruleSetAsOf') or report.get('ruleSetVersion'), 'Configured Legal Metrology rules')}", styles["PMRight"])]], colWidths=[57 * mm, 60 * mm, 53 * mm])
     meta.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 0)]))
-    result += [meta, Spacer(1, 5 * mm), _summary(report, styles), Spacer(1, 6 * mm), Paragraph("Product information and extracted declarations", styles["PMSection"]), _details(report, styles), Spacer(1, 6 * mm), Paragraph("Compliance findings", styles["PMSection"])]
+    result += [meta, Spacer(1, 5 * mm), _summary(report, styles), Spacer(1, 6 * mm), Paragraph("Product information and extracted declarations", styles["PMSection"]), _details(report, styles), Spacer(1, 5 * mm), Paragraph("Ingredients and nutrition", styles["PMSection"]), _composition(report, styles), Spacer(1, 6 * mm), Paragraph("Compliance findings", styles["PMSection"])]
     findings = [x for x in (report.get("results") or []) if x.get("outcome") != "NOT_APPLICABLE"]
     for item in findings: result += [_finding(item, styles), Spacer(1, 2.3 * mm)]
     if not findings: result.append(Paragraph("No applicable findings were recorded.", styles["PMBody"]))
-    result += [Spacer(1, 4 * mm), Paragraph("Submitted evidence", styles["PMSection"]), _evidence(report, styles), Paragraph(f"{int(report.get('imageCount') or 0)} package surface image(s) submitted. Raw OCR transcripts and debug confidence dumps are excluded from this officer-facing report.", styles["PMSmall"]), Spacer(1, 5 * mm), Paragraph("Officer determination", styles["PMSection"])]
+    result += [Spacer(1, 4 * mm), Paragraph("Submitted evidence", styles["PMSection"]), _evidence(report, styles), Paragraph(f"{int(report.get('imageCount') or 0)} package surface image(s) or live scan frame(s) assessed.", styles["PMSmall"]), Spacer(1, 5 * mm), Paragraph("Complete extracted text", styles["PMSection"]), *_transcript(report, styles), Spacer(1, 5 * mm), Paragraph("Officer determination", styles["PMSection"])]
     decisions = [("AI screening result", report.get("aiStatus") or report.get("status") or "Needs review"), ("Report status", _status(report)), ("Final officer determination", report.get("finalDecision") or "Pending officer review"), ("Officer remarks", report.get("officerRemarks") or "No final officer remark recorded"), ("Reviewed by", reviewer.get("name") or report.get("inspectorName") or "Pending"), ("Final review timestamp", report.get("reviewedAt") or "Pending"), ("Evidence references", f"{int(report.get('imageCount') or 0)} submitted package surface image(s)")]
     table = Table([[Paragraph(f"<b>{_safe(k)}</b>", styles["PMSmall"]), Paragraph(_safe(v), styles["PMBody"])] for k, v in decisions], colWidths=[42 * mm, 128 * mm])
     table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .35, BORDER), ("BACKGROUND", (0, 0), (0, -1), PALE), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 7)]))

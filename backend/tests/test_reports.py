@@ -5,7 +5,7 @@ from pypdf import PdfReader
 from app.reports import build_bulk_report_pdf, build_report_pdf
 
 
-def test_officer_pdf_is_structured_and_excludes_raw_transcript():
+def test_officer_pdf_is_structured_and_includes_reviewable_transcript():
     report = {
         "id": "PMX-TEST-P1", "inspectionId": "INS-TEST", "batchId": "BULK-TEST", "date": "31/08/2026, 10:30 am", "inspectorName": "Insp. Ramesh Sharma", "ruleSetAsOf": "2026-08-01",
         "status": "REVIEW", "workflowStatus": "OPEN", "verificationScore": 56,
@@ -23,7 +23,8 @@ def test_officer_pdf_is_structured_and_excludes_raw_transcript():
     assert "₹220" in text and "■220" not in text
     assert "AI screening result" in text and "Final officer determination" in text
     assert "Legal reference" in text
-    assert "SECRET DEBUG TRANSCRIPT LINE" not in text
+    assert "Complete extracted text" in text
+    assert "SECRET DEBUG TRANSCRIPT LINE" in text
 
 
 def test_bulk_pdf_keeps_two_products_distinct():

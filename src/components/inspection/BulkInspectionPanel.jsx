@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { downloadReportPdf, evaluateInspection, groupBulkImages } from '../../lib/api';
 import { getBulkBatch, saveBulkBatch, saveReport, updateReport } from '../../lib/reportStore';
 
-const DECLARATIONS = ['responsible_party_name','responsible_party_address','commodity_name','net_quantity','mrp','consumer_care','consumer_phone','consumer_email','country_of_origin','manufacture_pack_import_date','best_before_or_use_by','unit_sale_price','fssai_license','batch_number','barcode'];
+const DECLARATIONS = ['brand_name','responsible_party_name','responsible_party_address','commodity_name','net_quantity','mrp','consumer_care','consumer_phone','consumer_email','country_of_origin','manufacture_pack_import_date','best_before_or_use_by','unit_sale_price','fssai_license','batch_number','barcode','ingredients','nutrition_information'];
 const value = (fields, name) => fields?.[name]?.value || '';
 const fieldsFor = (images) => images.reduce((result, image) => { Object.entries(image.fields || {}).forEach(([field, evidence]) => { if (!result[field] || evidence.confidence > result[field].confidence) result[field] = evidence; }); return result; }, {});
 const regrouped = (group, images) => { const fields = fieldsFor(images); return { ...group, images, fields, name: value(fields, 'product_name') || value(fields, 'commodity_name') || 'Unidentified product', confirmed: false, report: null }; };
