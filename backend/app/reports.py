@@ -124,12 +124,32 @@ def _finding(item, styles):
 
 
 def _evidence(report, styles):
-    value = str(report.get("thumbnail") or "")
-    try:
-        if value.startswith("data:image") and "," in value:
-            image = Image(BytesIO(base64.b64decode(value.split(",", 1)[1]))); image._restrictSize(165 * mm, 82 * mm); return image
-    except Exception: pass
-    return Paragraph("Evidence image preview was not retained in this browser report.", styles["PMSmall"])
+    if report.get("captureMode") == "live":
+        return []
+    values = report.get("evidenceImages") or []
+    if not values and report.get("thumbnail"):
+        values = [{"imageId": "IMG-001", "fileName": "Submitted package evidence", "thumbnail": report["thumbnail"]}]
+    cells = []
+    for index, item in enumerate(values):
+        value = str(item.get("thumbnail") if isinstance(item, dict) else item or "")
+        try:
+            if not value.startswith("data:image") or "," not in value:
+                continue
+            image = Image(BytesIO(base64.b64decode(value.split(",", 1)[1])))
+            image._restrictSize(76 * mm, 58 * mm)
+            image.hAlign = "CENTER"
+            label = item.get("fileName") or item.get("imageId") or f"Package surface {index + 1}"
+            cells.append([image, Spacer(1, 1.5 * mm), Paragraph(_safe(label), styles["PMSmall"])])
+        except Exception:
+            continue
+    if not cells:
+        return []
+    rows = [cells[index:index + 2] for index in range(0, len(cells), 2)]
+    if len(rows[-1]) == 1:
+        rows[-1].append(Spacer(1, 1))
+    gallery = Table(rows, colWidths=[84 * mm, 84 * mm])
+    gallery.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .35, BORDER), ("INNERGRID", (0, 0), (-1, -1), .35, BORDER), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("PADDING", (0, 0), (-1, -1), 5)]))
+    return [gallery, Paragraph(f"{len(cells)} uploaded package surface image(s) retained for this product.", styles["PMSmall"])]
 
 
 def _story(report, styles, title=True):
@@ -141,7 +161,10 @@ def _story(report, styles, title=True):
     findings = [x for x in (report.get("results") or []) if x.get("outcome") != "NOT_APPLICABLE"]
     for item in findings: result += [_finding(item, styles), Spacer(1, 2.3 * mm)]
     if not findings: result.append(Paragraph("No applicable findings were recorded.", styles["PMBody"]))
-    result += [Spacer(1, 4 * mm), Paragraph("Submitted evidence", styles["PMSection"]), _evidence(report, styles), Paragraph(f"{int(report.get('imageCount') or 0)} package surface image(s) or live scan frame(s) assessed.", styles["PMSmall"]), Spacer(1, 5 * mm), Paragraph("Complete extracted text", styles["PMSection"]), *_transcript(report, styles), Spacer(1, 5 * mm), Paragraph("Officer determination", styles["PMSection"])]
+    evidence_flowables = _evidence(report, styles)
+    if evidence_flowables:
+        result += [Spacer(1, 4 * mm), Paragraph("Submitted evidence", styles["PMSection"]), *evidence_flowables, Spacer(1, 5 * mm)]
+    result += [Paragraph("Complete extracted text", styles["PMSection"]), *_transcript(report, styles), Spacer(1, 5 * mm), Paragraph("Officer determination", styles["PMSection"])]
     decisions = [("AI screening result", report.get("aiStatus") or report.get("status") or "Needs review"), ("Report status", _status(report)), ("Final officer determination", report.get("finalDecision") or "Pending officer review"), ("Officer remarks", report.get("officerRemarks") or "No final officer remark recorded"), ("Reviewed by", reviewer.get("name") or report.get("inspectorName") or "Pending"), ("Final review timestamp", report.get("reviewedAt") or "Pending"), ("Evidence references", f"{int(report.get('imageCount') or 0)} submitted package surface image(s)")]
     table = Table([[Paragraph(f"<b>{_safe(k)}</b>", styles["PMSmall"]), Paragraph(_safe(v), styles["PMBody"])] for k, v in decisions], colWidths=[42 * mm, 128 * mm])
     table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .35, BORDER), ("BACKGROUND", (0, 0), (0, -1), PALE), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 7)]))

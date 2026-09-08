@@ -32,9 +32,12 @@ export function saveReport(report) {
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {
-    // Keep the newest preview only if the browser quota is tight. Original
-    // evidence belongs in object storage in deployment, never as base64 DB rows.
-    localStorage.setItem(KEY, JSON.stringify(next.map((item, index) => index ? { ...item, thumbnail: '' } : item).slice(0, 30)));
+    // Preserve every preview for the newest inspection and discard previews
+    // from older browser-local reports first. Production deployments should
+    // store originals in object storage and retain only references here.
+    const reduced = next.map((item, index) => index ? { ...item, thumbnail: '', evidenceImages: [] } : item).slice(0, 30);
+    try { localStorage.setItem(KEY, JSON.stringify(reduced)); }
+    catch { localStorage.setItem(KEY, JSON.stringify(reduced.map((item) => ({ ...item, thumbnail: '', evidenceImages: [] })))); }
   }
   return report;
 }
