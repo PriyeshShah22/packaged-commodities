@@ -1,7 +1,11 @@
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
+import json
 import re
 from time import perf_counter
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import cv2
 import numpy as np
@@ -53,6 +57,22 @@ def _color_signature(content: bytes) -> list[float]:
     histogram = cv2.calcHist([hsv], [0, 1], None, [16, 4], [0, 180, 0, 256]).flatten()
     norm = float(np.linalg.norm(histogram)) or 1.0
     return [round(float(value / norm), 5) for value in histogram]
+
+
+def _qr_lines(content: bytes, image_id: str) -> list[dict]:
+    """Decode QR payloads separately from OCR and retain them in the transcript."""
+    image = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return []
+    try:
+        value, points, _ = cv2.QRCodeDetector().detectAndDecode(image)
+    except cv2.error:
+        return []
+    if not value:
+        return []
+    flat = points.reshape(-1, 2) if points is not None else np.empty((0, 2))
+    bbox = [float(flat[:, 0].min()), float(flat[:, 1].min()), float(flat[:, 0].max()), float(flat[:, 1].max())] if flat.size else None
+    return [{"text": f"QR Code: {value}", "confidence": 1.0, "image_id": image_id, "bbox": bbox, "source_type": "qr_detector"}]
 
 
 def _field_value(fields: dict, name: str) -> str:
@@ -160,6 +180,35 @@ def evaluate_validation(payload: ValidationRequest, _: User = Depends(require_ro
     return {"as_of": as_of, "counts": counts, "results": results}
 
 
+@router.get("/products/barcode/{code}")
+def barcode_product_lookup(code: str, _: User = Depends(require_roles("inspector", "admin"))):
+    digits = re.sub(r"\D", "", code)
+    if len(digits) not in {8, 12, 13, 14}:
+        raise HTTPException(status_code=400, detail="Scan a valid GTIN/EAN/UPC barcode.")
+    fields = "code,product_name,brands,generic_name,quantity,ingredients_text,nutriments,countries"
+    request = Request(
+        f"https://world.openfoodfacts.org/api/v2/product/{quote(digits)}.json?fields={fields}",
+        headers={"User-Agent": "PackMetrix/0.1 (packaged-commodities compliance prototype)"},
+    )
+    try:
+        with urlopen(request, timeout=6) as response:  # noqa: S310 - fixed trusted host
+            payload = json.load(response)
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return {"found": False, "code": digits, "source": "Open Food Facts", "reason": "lookup_unavailable"}
+    product = payload.get("product") or {}
+    return {
+        "found": bool(payload.get("status") == 1 and product),
+        "code": digits,
+        "source": "Open Food Facts",
+        "product_name": product.get("product_name") or product.get("generic_name") or "",
+        "brand_name": product.get("brands") or "",
+        "commodity_name": product.get("generic_name") or "",
+        "net_quantity": product.get("quantity") or "",
+        "ingredients": product.get("ingredients_text") or "",
+        "countries": product.get("countries") or "",
+    }
+
+
 @router.post("/ocr/extract")
 def extract_image_declarations(
     files: list[UploadFile] = File(...),
@@ -186,6 +235,7 @@ def extract_image_declarations(
             lines, quality = run_ocr(content, image_id, live=live)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=f"{filename}: {error}") from error
+        lines = [*lines, *_qr_lines(content, image_id)]
         return {"image_id": image_id, "file_name": filename, "quality": quality, "line_count": len(lines), "lines": lines}
 
     # Keep concurrency bounded while allowing front/back/side panels to overlap.
@@ -229,6 +279,7 @@ def bulk_group_images(files: list[UploadFile] = File(...), _: User = Depends(req
         index, filename, content = item
         image_id = f"BULK-{index + 1:03d}"
         lines, quality = run_ocr(content, image_id)
+        lines = [*lines, *_qr_lines(content, image_id)]
         fields = extract_declarations(lines)
         return {"index": index, "image_id": image_id, "file_name": filename, "quality": quality, "lines": lines, "fields": fields, "grouping_tokens": _grouping_tokens(lines, fields), "visual_hash": _image_hash(content), "color_signature": _color_signature(content)}
 

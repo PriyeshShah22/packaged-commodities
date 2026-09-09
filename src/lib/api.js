@@ -67,6 +67,11 @@ export async function groupBulkImages(files, token) {
   return readResponse(response, 'Bulk image grouping failed.');
 }
 
+export async function lookupBarcode(code, token) {
+  const response = await fetch(`${API_URL}/api/v1/products/barcode/${encodeURIComponent(code)}`, { headers: authHeaders(token) });
+  return readResponse(response, 'Barcode product lookup failed.');
+}
+
 export async function downloadReportPdf(report, token) {
   const response = await fetch(`${API_URL}/api/v1/reports/pdf`, { method: 'POST', headers: authHeaders(token, true), body: JSON.stringify(report) });
   if (!response.ok) {

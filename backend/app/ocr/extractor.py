@@ -18,6 +18,8 @@ ANCHORS = {
     "commodity_name": re.compile(r"\b(?:product\s+category|common\s+(?:or\s+generic\s+)?name|generic\s+name|name\s+of\s+commodity)\b", re.I),
 }
 
+QR_CODE = re.compile(r"^QR\s*Code\s*:\s*(.+)$", re.I)
+
 EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 URL = re.compile(r"(?:\bhttps?://|\bwww\.|\b[a-z0-9][a-z0-9-]*\.(?:com|in|org|net|co\.in)\b)", re.I)
 PHONE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9](?:[\s-]?\d){9}(?!\d)")
@@ -30,6 +32,8 @@ FSSAI = re.compile(r"\b\d{14}\b")
 BARCODE = re.compile(r"\b\d{8,14}\b")
 COMPANY = re.compile(r"\b(?:pvt\.?|private|ltd\.?|limited|company|co\.?|foods?|industries|enterprises|llp)\b", re.I)
 ADDRESS_HINT = re.compile(r"\b(?:address|road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|post|p\.?o\.?|city|state|india|pincode|pin|plot|sector|chamber|village|taluka|nagar|colony|phase|block|building|floor|survey|unit)\b|\b\d{6}\b", re.I)
+POSTAL_SIGNAL = re.compile(r"\b(?:road|rd\.?|street|st\.?|line|lane|industrial|estate|district|dist\.?|post|p\.?o\.?|pincode|pin|plot|sector|chamber|village|taluka|nagar|colony|phase|block|building|floor|survey)\b|\b\d{6}\b", re.I)
+NON_ADDRESS_INSTRUCTION = re.compile(r"\b(?:manufacturing\s+unit\s+address|marketer'?s\s+address|lic\.?\s*no|fssai|qr\s*code|scan\s+the|character\s+of\s+batch|follow\s+us)\b", re.I)
 NUTRITION = re.compile(r"\b(?:nutrition|serving|protein|fat|sodium|sugar|carbohydrate|calories|kcal|fibre|cholesterol|rda|ingredients?|allergens?|contains?|traces?)\b", re.I)
 INGREDIENTS_ANCHOR = re.compile(r"\bingredients?\b\s*[:.-]?", re.I)
 NUTRITION_HEADER = re.compile(r"\b(?:nutrition(?:al)?\s+(?:facts?|information)|amount\s+per\s+serving)\b", re.I)
@@ -83,7 +87,7 @@ def _evidence_strength(field: str, item: dict[str, Any]) -> float:
     words = len(re.findall(r"[A-Za-z]{2,}", value))
     score = confidence
     if field in {"mrp", "unit_sale_price"}:
-        score += min(digits, 6) * .025
+        score += min(digits, 6) * .06
         score += .05 if re.search(r"\d[.,]\d{1,2}\b", raw) else 0
         score += .03 if re.search(r"₹|\brs\.?\b|\binr\b|/-", raw, re.I) else 0
     elif field == "net_quantity":
@@ -250,6 +254,8 @@ def _batch_value(text: str) -> str:
     remainder = text[anchor.end():].strip(" :-,;")
     for match in BATCH.finditer(remainder):
         token = match.group(0)
+        if DATE.fullmatch(token):
+            continue
         if not re.search(r"\d", token) or (token.isdigit() and 10 <= len(token) <= 14):
             continue
         # Legal/help prose can mention "batch no." and contain an unrelated
@@ -260,6 +266,12 @@ def _batch_value(text: str) -> str:
             continue
         return token.upper()
     return ""
+
+
+def _normalize_address(value: str) -> str:
+    value = re.sub(r"\b(\d{3})\s+(\d{3})\b", r"\1\2", value)
+    value = re.sub(r"\s+([,.;])", r"\1", value)
+    return re.sub(r"\s+", " ", value).strip(" ,.;")
 
 
 def _inside_nutrition_table(item: dict[str, Any], image_lines: list[dict[str, Any]]) -> bool:
@@ -286,7 +298,7 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
         if text:
             by_image.setdefault(line["image_id"], []).append({**line, "text": text})
 
-    candidates: dict[str, list[dict[str, Any]]] = {field: [] for field in (*ANCHORS, "responsible_party_address", "consumer_phone", "consumer_email", "barcode", "brand_name", "product_name", "ingredients", "nutrition_information")}
+    candidates: dict[str, list[dict[str, Any]]] = {field: [] for field in (*ANCHORS, "responsible_party_address", "consumer_phone", "consumer_email", "barcode", "qr_code", "brand_name", "product_name", "ingredients", "nutrition_information")}
     for image_lines in by_image.values():
         candidates["net_quantity"] += _extract_labeled("net_quantity", image_lines, _normalize_quantity)
         heights = [max(1, item["bbox"][3] - item["bbox"][1]) for item in image_lines if item.get("bbox")]
@@ -339,6 +351,9 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
         for anchor in image_lines:
             text = anchor["text"]
+            qr = QR_CODE.match(text)
+            if qr and qr.group(1).strip():
+                candidates["qr_code"].append(_candidate("qr_code", qr.group(1).strip(), [anchor]))
             if ANCHORS["country_of_origin"].search(text):
                 value = _after_anchor(ANCHORS["country_of_origin"], text)
                 if value: candidates["country_of_origin"].append(_candidate("country_of_origin", value.title(), [anchor]))
@@ -359,24 +374,40 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 # Start with a genuine address signal, then retain adjacent lines
                 # in the same printed block instead of requiring every line to
                 # contain a location keyword.
-                address_seeds = [item for item in nearby if item is not party_source and ADDRESS_HINT.search(item["text"]) and not ANCHORS["responsible_party_name"].search(item["text"])]
+                party_box = party_source.get("bbox") or [0, 0, 0, 0]
+                party_y = _center(party_source)[1]
+                address_seeds = [item for item in nearby
+                                 if item not in (anchor, party_source)
+                                 and POSTAL_SIGNAL.search(item["text"])
+                                 and not ANCHORS["responsible_party_name"].search(item["text"])
+                                 and not EMAIL.search(item["text"]) and not PHONE.search(item["text"])
+                                 and (item.get("bbox") or [0, 0, 0, 0])[0] <= party_box[2] + 100
+                                 and (item.get("bbox") or [0, 0, 0, 0])[2] >= party_box[0] - 100]
                 address_lines = []
                 if address_seeds:
-                    seed = min(address_seeds, key=lambda item: abs(_center(item)[1] - _center(party_source)[1]))
+                    below_party = [item for item in address_seeds if party_y <= _center(item)[1] <= party_y + 240]
+                    seed = min(below_party or address_seeds, key=lambda item: abs(_center(item)[1] - party_y))
                     seed_x, seed_y = _center(seed)
+                    seed_box = seed.get("bbox") or [0, 0, 0, 0]
                     seed_height = max(16, seed["bbox"][3] - seed["bbox"][1])
                     for item in image_lines:
                         item_x, item_y = _center(item)
+                        item_box = item.get("bbox") or [0, 0, 0, 0]
                         words = re.findall(r"[A-Za-z]{2,}", item["text"])
                         competing_label = any(pattern.search(item["text"]) for name, pattern in ANCHORS.items() if name != "responsible_party_name")
                         if (item not in (anchor, party_source) and not competing_label and not NUTRITION.search(item["text"])
+                                and not ANCHORS["responsible_party_name"].search(item["text"])
                                 and abs(item_y - seed_y) <= max(90, seed_height * 4.5)
-                                and abs(item_x - seed_x) <= 480 and words):
+                                and item_box[0] <= max(seed_box[2], party_box[2]) + 100
+                                and item_box[2] >= min(seed_box[0], party_box[0]) - 100
+                                and not EMAIL.search(item["text"]) and not PHONE.search(item["text"])
+                                and not URL.search(item["text"]) and not NON_ADDRESS_INSTRUCTION.search(item["text"])
+                                and words):
                             address_lines.append(item)
                 if address_lines:
                     address_lines.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
                     address_lines = address_lines[:4]
-                    candidates["responsible_party_address"].append(_candidate("responsible_party_address", " ".join(item["text"] for item in address_lines), address_lines, .02))
+                    candidates["responsible_party_address"].append(_candidate("responsible_party_address", _normalize_address(" ".join(item["text"] for item in address_lines)), address_lines, .02))
             if ANCHORS["consumer_care"].search(text) or EMAIL.search(text) or PHONE.search(text):
                 nearby_text = " ".join(item["text"] for item in _near(anchor, image_lines, 8))
                 email = EMAIL.search(f"{text} {nearby_text}")
@@ -387,8 +418,31 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 if phone: candidates["consumer_phone"].append(_candidate("consumer_phone", re.sub(r"[\s-]", "", phone.group(0)), [anchor]))
             fssai = FSSAI.search(text)
             if fssai and re.search(r"fssai|ssai|lic", text, re.I): candidates["fssai_license"].append(_candidate("fssai_license", fssai.group(0), [anchor]))
+            elif fssai:
+                label = next((item for item in _near(anchor, image_lines, 6)
+                              if item is not anchor and ANCHORS["fssai_license"].search(item["text"])), None)
+                if label:
+                    candidates["fssai_license"].append(_candidate("fssai_license", fssai.group(0), [label, anchor], .04))
             barcode = BARCODE.fullmatch(re.sub(r"\s", "", text))
             if barcode and not FSSAI.fullmatch(barcode.group(0)) and not PHONE.fullmatch(barcode.group(0)): candidates["barcode"].append(_candidate("barcode", barcode.group(0), [anchor], .05))
+
+        # A clear postal line can still be mapped when the OCR engine misses or
+        # separates the faint "manufactured by" caption. A PIN plus a locality
+        # signal is generic address evidence and does not depend on a product.
+        for seed in image_lines:
+            text = seed["text"]
+            has_pin = bool(re.search(r"\b\d{3}\s*\d{3}\b", text))
+            if not has_pin or not POSTAL_SIGNAL.search(text) or NUTRITION.search(text) or EMAIL.search(text):
+                continue
+            nearby = [item for item in _near(seed, image_lines, 5)
+                      if abs(_center(item)[1] - _center(seed)[1]) <= 70
+                      and not ANCHORS["responsible_party_name"].search(item["text"])
+                      and not NON_ADDRESS_INSTRUCTION.search(item["text"])
+                      and not PHONE.search(item["text"])]
+            nearby.sort(key=lambda item: (_center(item)[1], _center(item)[0]))
+            address = _normalize_address(" ".join(item["text"] for item in nearby[:3]))
+            if len(re.findall(r"[A-Za-z]{2,}", address)) >= 2:
+                candidates["responsible_party_address"].append(_candidate("responsible_party_address", address, nearby[:3], .12))
 
         # Ingredient text is a content block, not a single label/value line.
         # Collect nearby following lines until another package section begins.
@@ -443,6 +497,8 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
         nutrition_rows = []
         nutrition_sources = []
+        rda_headers = [item for item in ordered_lines if re.search(r"%?\s*(?:rda|dv)\b", item["text"], re.I)]
+        rda_x = min((_center(item)[0] for item in rda_headers), default=None)
         for label in ordered_lines:
             if not NUTRIENT_LINE.search(label["text"]) or INGREDIENTS_ANCHOR.search(label["text"]):
                 continue
@@ -455,11 +511,21 @@ def extract_declarations(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
             values = [item for item in ordered_lines if item is not label
                       and (item.get("bbox") or [0, 0, 0, 0])[0] >= label["bbox"][2] - 5
                       and abs(_center(item)[1] - label_y) <= max(8, label_height * .4)
-                      and _center(item)[0] - label_x <= 360
+                      and _center(item)[0] - label_x <= 520
                       and re.search(r"\d", item["text"])]
             values.sort(key=lambda item: _center(item)[0])
             row_sources = [label, *values[:2]]
-            nutrition_rows.append(" ".join(item["text"].strip(" ;") for item in row_sources))
+            if rda_x is not None and values:
+                declared = [item for item in values if _center(item)[0] < rda_x - 8]
+                rda_values = [item for item in values if _center(item)[0] >= rda_x - 8]
+                pieces = [label["text"].strip(" ;")]
+                if declared:
+                    pieces.append(declared[0]["text"].strip(" ;"))
+                if rda_values:
+                    pieces.append(f"| RDA {rda_values[0]['text'].strip(' ;')}")
+                nutrition_rows.append(" ".join(pieces))
+            else:
+                nutrition_rows.append(" ".join(item["text"].strip(" ;") for item in row_sources))
             nutrition_sources.extend(row_sources)
         if nutrition_rows:
             value = "; ".join(dict.fromkeys(nutrition_rows))

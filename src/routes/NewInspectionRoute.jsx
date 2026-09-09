@@ -5,11 +5,11 @@ import AppShell from '../components/AppShell';
 import LiveCameraScanner from '../components/inspection/LiveCameraScanner';
 import BulkInspectionPanel from '../components/inspection/BulkInspectionPanel';
 import { useAuth } from '../context/auth-context';
-import { downloadReportPdf, evaluateInspection, extractImages } from '../lib/api';
+import { downloadReportPdf, evaluateInspection, extractImages, lookupBarcode } from '../lib/api';
 import { saveReport } from '../lib/reportStore';
 
-const EMPTY = { brand_name: '', responsible_party_name: '', responsible_party_address: '', commodity_name: '', net_quantity: '', mrp: '', consumer_care: '', consumer_phone: '', consumer_email: '', country_of_origin: '', manufacture_pack_import_date: '', best_before_or_use_by: '', unit_sale_price: '', fssai_license: '', batch_number: '', barcode: '', ingredients: '', nutrition_information: '' };
-const LABELS = { brand_name: 'Brand name', responsible_party_name: 'Manufacturer / packer / importer', responsible_party_address: 'Responsible party address', commodity_name: 'Common / generic commodity name', net_quantity: 'Net quantity', mrp: 'Maximum retail price', consumer_phone: 'Consumer-care mobile number', consumer_email: 'Consumer-care email', fssai_license: 'FSSAI licence number', batch_number: 'Batch / lot number', barcode: 'Barcode / GTIN', country_of_origin: 'Country of origin', manufacture_pack_import_date: 'Manufacture / pack / import date', best_before_or_use_by: 'Best before / use by', unit_sale_price: 'Unit sale price', ingredients: 'Ingredients', nutrition_information: 'Nutrition information' };
+const EMPTY = { brand_name: '', responsible_party_name: '', responsible_party_address: '', commodity_name: '', net_quantity: '', mrp: '', consumer_care: '', consumer_phone: '', consumer_email: '', country_of_origin: '', manufacture_pack_import_date: '', best_before_or_use_by: '', unit_sale_price: '', fssai_license: '', batch_number: '', barcode: '', qr_code: '', ingredients: '', nutrition_information: '' };
+const LABELS = { brand_name: 'Brand name', responsible_party_name: 'Manufacturer / packer / importer', responsible_party_address: 'Responsible party address', commodity_name: 'Common / generic commodity name', net_quantity: 'Net quantity', mrp: 'Maximum retail price', consumer_phone: 'Consumer-care mobile number', consumer_email: 'Consumer-care email', fssai_license: 'FSSAI licence number', batch_number: 'Batch / lot number', barcode: 'Barcode / GTIN', qr_code: 'QR code content', country_of_origin: 'Country of origin', manufacture_pack_import_date: 'Manufacture / pack / import date', best_before_or_use_by: 'Best before / use by', unit_sale_price: 'Unit sale price', ingredients: 'Ingredients', nutrition_information: 'Nutrition information' };
 
 function newProduct(number) {
   return { key: `${Date.now()}-${number}`, number, details: { productId: '', productName: '' }, context: { category: 'unknown', origin: 'unknown', salesContext: 'retail' }, conditions: { date: false, perishable: false, unitPrice: false }, mode: 'upload', images: [], declarations: { ...EMPTY }, coverageComplete: false, ocrData: null, ocrLoading: false, ocrError: '', results: null, loading: false, error: '', report: null };
@@ -27,7 +27,7 @@ function evidenceStrength(field, evidence) {
   const value = String(evidence.value); const raw = String(evidence.raw_text || '');
   const digits = (value.match(/\d/g) || []).length; const words = (value.match(/[A-Za-z]{2,}/g) || []).length;
   let score = Number(evidence.confidence || 0);
-  if (['mrp', 'unit_sale_price'].includes(field)) score += Math.min(digits, 6) * .025 + (/\d[.,]\d{1,2}\b/.test(raw) ? .05 : 0) + (/(?:₹|\brs\.?\b|\binr\b|\/-)/i.test(raw) ? .03 : 0);
+  if (['mrp', 'unit_sale_price'].includes(field)) score += Math.min(digits, 6) * .06 + (/\d[.,]\d{1,2}\b/.test(raw) ? .05 : 0) + (/(?:₹|\brs\.?\b|\binr\b|\/-)/i.test(raw) ? .03 : 0);
   else if (field === 'net_quantity') score += Math.min(digits, 7) * .03;
   else if (['consumer_phone', 'fssai_license', 'barcode'].includes(field)) score += Math.min(digits, 14) * .012;
   else if (['manufacture_pack_import_date', 'best_before_or_use_by', 'batch_number'].includes(field)) score += Math.min(value.replace(/\s/g, '').length, 14) * .008;
@@ -58,7 +58,7 @@ function refinedLines(ocrData) {
   const unique = new Map();
   (ocrData?.images || []).flatMap((image) => image.lines || []).forEach((line) => {
     const text = String(line.text || '').replace(/\s+/g, ' ').trim();
-    if ((line.confidence || 0) < .6 || text.length < 2 || !/[A-Za-z0-9₹]/.test(text)) return;
+    if (!text.length || !/[A-Za-z0-9₹]/.test(text)) return;
     const key = text.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (!key) return;
     if (!unique.has(key) || line.confidence > unique.get(key).confidence) unique.set(key, { ...line, text });
@@ -93,8 +93,9 @@ export default function NewInspectionRoute() {
   const addProduct = () => { const product = newProduct(products.length + 1); setProducts((current) => [...current, product]); setActiveKey(product.key); };
   const removeProduct = (key) => { if (products.length === 1) return; products.find((p) => p.key === key)?.images.forEach((image) => URL.revokeObjectURL(image.url)); const next = products.filter((p) => p.key !== key); setProducts(next); if (activeKey === key) setActiveKey(next[0].key); };
 
-  const runOcr = async (key, files, append = false, live = false) => {
-    if (!files.length) return false; update(key, { ocrLoading: true, ocrError: '' });
+  const runOcr = async (key, files, append = false, live = false, background = false) => {
+    if (!files.length) return false;
+    if (!background) update(key, { ocrLoading: true, ocrError: '' });
     try {
       const data = await extractImages(files, token, { live }); const tooBlurry = data.images?.some((image) => image.quality?.blur_status === 'high');
       update(key, (product) => {
@@ -113,14 +114,14 @@ export default function NewInspectionRoute() {
       });
       requestAnimationFrame(() => console.debug('[Live OCR] UI updated', { fields: Object.keys(data.fields || {}).length }));
       return true;
-    } catch (error) { update(key, { ocrError: error.message }); return false; } finally { update(key, { ocrLoading: false }); }
+    } catch (error) { if (!background) update(key, { ocrError: error.message }); return false; } finally { if (!background) update(key, { ocrLoading: false }); }
   };
 
   const addImages = async (event) => { const files = Array.from(event.target.files || []).slice(0, 12 - active.images.length); const records = await Promise.all(files.map((file, index) => imageRecord(file, active.images.length + index))); const next = [...active.images, ...records]; update(active.key, { images: next }); event.target.value = ''; await runOcr(active.key, files, active.images.length > 0); };
-  const cameraCapture = async (file, automatic) => {
+  const cameraCapture = async (file, automatic, precision = false) => {
     // Automatic live frames are transient OCR samples, not evidence photos.
     // Only an explicit Capture Evidence action creates a clickable image card.
-    if (automatic) return runOcr(active.key, [file], true, true);
+    if (automatic) return runOcr(active.key, [file], true, !precision, precision);
     // Send the frame to OCR immediately. Preview decoding/compression is local
     // bookkeeping and can run in parallel instead of delaying field updates.
     const recordPromise = imageRecord(file, active.images.length, false);
@@ -131,6 +132,29 @@ export default function NewInspectionRoute() {
       return { images: next };
     });
     return succeeded;
+  };
+  const codeDetected = async ({ value, format }) => {
+    const digits = value.replace(/\D/g, '');
+    const isBarcode = format !== 'qr_code' && [8, 12, 13, 14].includes(digits.length);
+    const field = isBarcode ? 'barcode' : 'qr_code';
+    const detectedValue = isBarcode ? digits : value;
+    update(active.key, (product) => {
+      const evidence = { field, value: detectedValue, raw_text: detectedValue, confidence: 1, source_type: 'barcode_detector', image_id: 'LIVE-CODE' };
+      const line = { text: `${format === 'qr_code' ? 'QR Code' : 'Barcode'}: ${detectedValue}`, confidence: 1, image_id: 'LIVE-CODE', bbox: null };
+      const incoming = { images: [{ image_id: 'LIVE-CODE', file_name: 'live-code-scan', lines: [line], quality: { resolution_sufficient: true } }], total_lines: 1, fields: { [field]: evidence } };
+      return { ocrData: mergedOcr(product.ocrData, incoming), declarations: { ...product.declarations, [field]: detectedValue }, details: { ...product.details, productId: isBarcode ? digits : product.details.productId } };
+    });
+    if (!isBarcode) return;
+    try {
+      const productInfo = await lookupBarcode(digits, token);
+      if (!productInfo.found) return;
+      update(active.key, (product) => {
+        const mapping = { brand_name: productInfo.brand_name, commodity_name: productInfo.commodity_name, net_quantity: productInfo.net_quantity, ingredients: productInfo.ingredients };
+        const declarations = { ...product.declarations };
+        Object.entries(mapping).forEach(([key, mapped]) => { if (mapped && !declarations[key]) declarations[key] = mapped; });
+        return { declarations, details: { ...product.details, productId: digits, productName: product.details.productName || productInfo.product_name || '' } };
+      });
+    } catch { /* A decoded code remains useful even when the catalogue is offline. */ }
   };
   const removeImage = (id) => { const removed = active.images.find((image) => image.id === id); if (removed) URL.revokeObjectURL(removed.url); const images = active.images.filter((image) => image.id !== id).map((image, index) => ({ ...image, id: `IMG-${String(index + 1).padStart(3, '0')}` })); update(active.key, { images }); };
   const clearExtractedText = () => { if (!window.confirm('Clear all retained OCR text and AI-mapped declaration values for this product? Evidence photographs will remain.')) return; update(active.key, { ocrData: null, declarations: { ...EMPTY }, details: { ...active.details, productId: '', productName: '' }, results: null, report: null, ocrError: '' }); };
@@ -446,6 +470,7 @@ export default function NewInspectionRoute() {
                 <div className="mt-4">
                   <LiveCameraScanner
                     onCapture={cameraCapture}
+                    onCodeDetected={codeDetected}
                     ocrData={active.ocrData}
                     busy={active.ocrLoading}
                   />

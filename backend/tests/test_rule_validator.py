@@ -50,6 +50,15 @@ def test_low_confidence_is_review_not_failure():
     assert result["outcome"] == "REVIEW"
 
 
+def test_detected_phone_satisfies_combined_consumer_care_rule():
+    request = retail_request(
+        evidence=[EvidenceItem(field="consumer_phone", value="+918484088130", confidence=0.96, image_id="IMG-002")]
+    )
+    result = validate_rule(rule("LMPC-R6-2-CONSUMER-CARE"), request)
+    assert result["outcome"] == "PASS"
+    assert result["evidence"][0]["field"] == "consumer_care"
+
+
 def test_conflicting_evidence_is_review_and_both_sources_are_retained():
     request = retail_request(
         evidence=[

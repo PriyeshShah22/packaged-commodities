@@ -53,6 +53,19 @@ export function updateReport(id, patch) {
 export function archiveReport(id) { return updateReport(id, { archived: true, archivedAt: new Date().toISOString() }); }
 export function restoreReport(id) { return updateReport(id, { archived: false, archivedAt: null }); }
 
+export function deleteReport(id) {
+  const next = getReports().filter((report) => report.id !== id);
+  localStorage.setItem(KEY, JSON.stringify(next));
+  const batches = getBulkBatches().map((batch) => ({
+    ...batch,
+    groups: (batch.groups || []).map((group) =>
+      group.report?.id === id ? { ...group, report: null } : group
+    ),
+  }));
+  localStorage.setItem(BULK_KEY, JSON.stringify(batches));
+  return true;
+}
+
 export function getBulkBatches() {
   try { return JSON.parse(localStorage.getItem(BULK_KEY) || '[]'); } catch { return []; }
 }
@@ -65,6 +78,11 @@ export function saveBulkBatch(batch) {
   try { localStorage.setItem(BULK_KEY, JSON.stringify(next)); }
   catch { localStorage.setItem(BULK_KEY, JSON.stringify(next.map((item) => ({ ...item, groups: item.groups.map((group) => ({ ...group, images: group.images.map((image) => ({ ...image, thumbnail: '' })) })) })))); }
   return batch;
+}
+
+export function deleteBulkBatch(id) {
+  localStorage.setItem(BULK_KEY, JSON.stringify(getBulkBatches().filter((batch) => batch.id !== id)));
+  return true;
 }
 
 export function computeDashboard(reports = getReports()) {

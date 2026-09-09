@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 from io import BytesIO
 from typing import Any
 
@@ -406,10 +407,16 @@ def _evidence(report, styles):
 
 def _composition(report, styles):
     fields = report.get("declarations") or {}
-    data = [
-        [Paragraph("INGREDIENTS", styles["PMLabel"]), Paragraph(_safe(fields.get("ingredients")), styles["PMBody"])],
-        [Paragraph("NUTRITION INFORMATION", styles["PMLabel"]), Paragraph(_safe(fields.get("nutrition_information")), styles["PMBody"])],
-    ]
+    ingredients = str(fields.get("ingredients") or "").strip()
+    ingredient_letters = len(re.findall(r"[A-Za-z]", ingredients))
+    ingredient_valid = ingredient_letters >= 3 and not re.search(r"@|https?://|www\.|\b(?:mrp|batch|consumer care)\b", ingredients, re.I)
+    data = []
+    if ingredient_valid:
+        data.append([Paragraph("INGREDIENTS", styles["PMLabel"]), Paragraph(_safe(ingredients), styles["PMBody"])])
+    if fields.get("nutrition_information"):
+        data.append([Paragraph("NUTRITION INFORMATION", styles["PMLabel"]), Paragraph(_safe(fields.get("nutrition_information")), styles["PMBody"])])
+    if not data:
+        return Paragraph("No reliable ingredients or nutrition declaration was extracted.", styles["PMSmall"])
     table = Table(data, colWidths=[38 * mm, 144 * mm])
     table.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.35, BORDER),
@@ -756,10 +763,19 @@ def build_bulk_report_pdf(batch: dict[str, Any]) -> bytes:
         summary_table,
         Spacer(1, 5 * mm),
         Paragraph(
-            "Each report ID references a separate product inspection record with its own evidence, declarations, findings, review state, and downloadable detailed PDF. Raw OCR and debug output are excluded from this bulk summary.",
+            "Each report ID references a separate product inspection record. The complete retained OCR transcript for every product follows for audit and comparison.",
             styles["PMSmall"]
         )
     ]
+    for report in ordered:
+        product_name = (report.get("details") or {}).get("productName") or "Unidentified product"
+        story += [
+            PageBreak(),
+            Paragraph(f"OCR Transcript — {_safe(product_name)}", styles["PMSection"]),
+            Paragraph(f"Report dossier: {_safe(report.get('id'))}", styles["PMSmall"]),
+            Spacer(1, 2 * mm),
+            *_transcript(report, styles),
+        ]
     doc.build(story, canvasmaker=NumberedCanvas)
     return stream.getvalue()
 

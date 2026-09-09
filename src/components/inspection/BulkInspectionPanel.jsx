@@ -1,14 +1,25 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, Download, Eye, Loader2, Pencil, Save, Upload, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, Eye, Loader2, Pencil, Save, Trash2, Upload, X } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { downloadReportPdf, evaluateInspection, groupBulkImages } from '../../lib/api';
-import { getBulkBatch, saveBulkBatch, saveReport, updateReport } from '../../lib/reportStore';
+import { deleteBulkBatch, getBulkBatch, saveBulkBatch, saveReport, updateReport } from '../../lib/reportStore';
 
-const DECLARATIONS = ['brand_name','responsible_party_name','responsible_party_address','commodity_name','net_quantity','mrp','consumer_care','consumer_phone','consumer_email','country_of_origin','manufacture_pack_import_date','best_before_or_use_by','unit_sale_price','fssai_license','batch_number','barcode','ingredients','nutrition_information'];
+const DECLARATIONS = ['brand_name','responsible_party_name','responsible_party_address','commodity_name','net_quantity','mrp','consumer_care','consumer_phone','consumer_email','country_of_origin','manufacture_pack_import_date','best_before_or_use_by','unit_sale_price','fssai_license','batch_number','barcode','qr_code','ingredients','nutrition_information'];
 const value = (fields, name) => fields?.[name]?.value || '';
 const fieldsFor = (images) => images.reduce((result, image) => { Object.entries(image.fields || {}).forEach(([field, evidence]) => { if (!result[field] || evidence.confidence > result[field].confidence) result[field] = evidence; }); return result; }, {});
 const regrouped = (group, images) => { const fields = fieldsFor(images); return { ...group, images, fields, name: value(fields, 'product_name') || value(fields, 'commodity_name') || 'Unidentified product', confirmed: false, report: null }; };
-const persistableGroups = (groups) => groups.map((group) => ({ ...group, images: group.images.map(({ file: _file, lines: _lines, visual_hash: _visualHash, color_signature: _colorSignature, ...image }) => image) }));
+const persistableGroups = (groups) => groups.map((group) => ({ ...group, images: group.images.map(({ file: _file, visual_hash: _visualHash, color_signature: _colorSignature, ...image }) => image) }));
+const transcriptFor = (images) => {
+  const unique = new Map();
+  (images || []).flatMap((image) => image.lines || []).forEach((line) => {
+    const text = String(line?.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const key = text.toLocaleLowerCase();
+    const normalized = { text, confidence: Number(line.confidence || 0), image_id: line.image_id };
+    if (!unique.has(key) || normalized.confidence > unique.get(key).confidence) unique.set(key, normalized);
+  });
+  return [...unique.values()].sort((a, b) => b.confidence - a.confidence);
+};
 async function thumbnailFor(file) { const url = URL.createObjectURL(file); const image = new Image(); image.src = url; await image.decode().catch(() => {}); const canvas = document.createElement('canvas'); const scale = Math.min(1, 280 / Math.max(1, image.width)); canvas.width = Math.round(image.width * scale); canvas.height = Math.round(image.height * scale); canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height); URL.revokeObjectURL(url); return canvas.toDataURL('image/jpeg', .58); }
 
 function BulkGroupCard({ group, groups, onConfirm, onMove, onCreate, onRename, onView }) {
@@ -199,7 +210,7 @@ function reportFor(group, response, user, batchId) {
     counts: response.counts,
     results: response.results,
     violations: [...failures, ...reviews],
-    ocrLines: [],
+    ocrLines: transcriptFor(group.images),
     ocrStatus: 'Text evidence detected',
     imageCount: group.images.length,
     imageQuality: group.images.map((image) => ({ imageId: image.image_id, ...image.quality })),
@@ -221,6 +232,16 @@ export default function BulkInspectionPanel({ token, user }) {
     total: 0,
   });
   const [downloading, setDownloading] = useState(false);
+
+  const clearBatch = () => {
+    if (!window.confirm('Clear this bulk batch and start again? Generated reports remain available in Reports.')) return;
+    if (batchId) deleteBulkBatch(batchId);
+    setBatchId('');
+    setGroups([]);
+    setProgress({ done: 0, total: 0 });
+    setError('');
+    setSearchParams({ mode: 'bulk' }, { replace: true });
+  };
 
   useEffect(() => {
     if (batchId && groups.length)
@@ -492,13 +513,18 @@ export default function BulkInspectionPanel({ token, user }) {
                 {Math.max(0, progress.total - progress.done)} in queue
               </p>
             </div>
-            <button
-              onClick={analyzeAll}
-              disabled={analyzing || groups.some((group) => !group.confirmed)}
-              className="bg-[#0B1224] hover:bg-[#131F37] disabled:opacity-40 text-white px-6 py-3 rounded-xl text-xs sm:text-sm font-bold shadow-xs hover-lift transition-all cursor-pointer shrink-0"
-            >
-              {analyzing ? `${progress.done}/${progress.total} Evaluated…` : 'Analyze All Confirmed Products'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={clearBatch} disabled={loading || analyzing} className="border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:opacity-40 px-4 py-3 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer">
+                <Trash2 className="w-4 h-4" /> Clear batch
+              </button>
+              <button
+                onClick={analyzeAll}
+                disabled={analyzing || groups.some((group) => !group.confirmed)}
+                className="bg-[#0B1224] hover:bg-[#131F37] disabled:opacity-40 text-white px-6 py-3 rounded-xl text-xs sm:text-sm font-bold shadow-xs hover-lift transition-all cursor-pointer shrink-0"
+              >
+                {analyzing ? `${progress.done}/${progress.total} Evaluated…` : 'Analyze All Confirmed Products'}
+              </button>
+            </div>
           </div>
 
           <div className="grid lg:grid-cols-2 gap-4">

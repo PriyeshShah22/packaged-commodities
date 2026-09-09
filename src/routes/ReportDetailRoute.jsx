@@ -40,12 +40,13 @@ const OUTCOMES = [
 export default function ReportDetailRoute() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { token, user } = useAuth();
+  const { token, user, hasRole } = useAuth();
   const [report, setReport] = useState(() => getReport(id));
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
   const [lightboxImage, setLightboxImage] = useState(null);
   const [animatedProgress, setAnimatedProgress] = useState(false);
+  const canReview = hasRole('inspector', 'admin');
 
   useEffect(() => {
     const timer = setTimeout(() => setAnimatedProgress(true), 150);
@@ -154,6 +155,7 @@ export default function ReportDetailRoute() {
   const productName = report.details?.productName || report.declarations?.commodity_name || 'Unnamed Package Commodity';
   const productId = report.details?.productId || report.declarations?.barcode || report.id;
   const mrp = report.declarations?.mrp;
+  const mrpDisplay = mrp ? mrp.replace(/^\s*(?:₹\s*)?MRP\s*/i, '').trim() : '';
   const netQty = report.declarations?.net_quantity;
   const mfgDate = report.declarations?.manufacture_pack_import_date;
   const expDate = report.declarations?.best_before_or_use_by;
@@ -188,7 +190,7 @@ export default function ReportDetailRoute() {
         <button
           onClick={() =>
             navigate(
-              bulkBatch
+              bulkBatch && canReview
                 ? `/inspections/new?mode=bulk&batch=${encodeURIComponent(report.batchId)}`
                 : '/reports'
             )
@@ -410,7 +412,7 @@ export default function ReportDetailRoute() {
                 <Coins className="w-3.5 h-3.5 text-amber-600" />
               </div>
               <p className="text-2xl sm:text-3xl font-extrabold text-[#0B1224] tracking-tight">
-                {mrp ? (mrp.startsWith('₹') ? mrp : `₹${mrp}`) : 'Not Detected'}
+                {mrpDisplay ? (mrpDisplay.startsWith('₹') ? mrpDisplay : `₹${mrpDisplay}`) : 'Not Detected'}
               </p>
               {unitPrice && (
                 <p className="text-xs font-mono text-slate-500 mt-1">
@@ -676,8 +678,8 @@ export default function ReportDetailRoute() {
               </div>
             </div>
 
-            {/* Ingredients Disclosure */}
-            <div className="p-5 rounded-2xl bg-[#FAF8F5] border border-[#E8E2D5] flex flex-col">
+            {/* Ingredients Disclosure — hidden when OCR did not produce a credible ingredient list. */}
+            {isValidIngredientValue(report.declarations?.ingredients) && <div className="p-5 rounded-2xl bg-[#FAF8F5] border border-[#E8E2D5] flex flex-col">
               <div className="pb-3 border-b border-[#E8E2D5] mb-3">
                 <span className="text-xs font-mono font-bold text-slate-800 uppercase flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-amber-600" />
@@ -687,7 +689,7 @@ export default function ReportDetailRoute() {
               <div className="flex-1 max-h-72 overflow-y-auto">
                 <IngredientList value={report.declarations?.ingredients} />
               </div>
-            </div>
+            </div>}
 
             {/* Nutrition Information */}
             <div className="p-5 rounded-2xl bg-[#FAF8F5] border border-[#E8E2D5] flex flex-col">
@@ -707,7 +709,7 @@ export default function ReportDetailRoute() {
         {/* =======================================================================
             TIER 5: OFFICER REVIEW & COMPLIANCE DECISIONS WORKFLOW
             ======================================================================= */}
-        <section className="bg-white border border-[#E8E2D5] rounded-3xl p-6 sm:p-8 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
+        {canReview && <section className="bg-white border border-[#E8E2D5] rounded-3xl p-6 sm:p-8 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-[#E8E2D5]">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center shrink-0 border border-amber-200">
@@ -843,7 +845,7 @@ export default function ReportDetailRoute() {
               </div>
             </div>
           </div>
-        </section>
+        </section>}
       </div>
 
       {/* =========================================================================
@@ -1025,8 +1027,7 @@ function ConfidenceBadge({ evidence }) {
 
 // Structured Ingredient List
 function IngredientList({ value }) {
-  if (!value) return <p className="text-xs text-slate-500 font-mono py-2">Not detected</p>;
-  const items = value.split(/[,;]+/).map((item) => item.trim()).filter(Boolean);
+  const items = cleanIngredientItems(value);
   return (
     <div className="flex flex-wrap gap-1.5">
       {items.map((item, index) => (
@@ -1041,24 +1042,55 @@ function IngredientList({ value }) {
   );
 }
 
+function cleanIngredientItems(value) {
+  if (!value) return [];
+  const cleaned = String(value)
+    .replace(/^\s*ingredients?\s*[:-]?\s*/i, '')
+    .split(/\b(?:allergens?|may contain|for feedback|consumer care|customer care)\b/i)[0];
+  return cleaned.split(/[,;]+/).map((item) => item.trim()).filter((item) => {
+    const letters = (item.match(/[a-z]/gi) || []).length;
+    return letters >= 3 && item.length <= 120 && !/@|https?:|www\.|\b(?:mrp|batch|lic(?:ence)?\.?\s*no)\b/i.test(item);
+  });
+}
+
+function isValidIngredientValue(value) {
+  return cleanIngredientItems(value).length > 0;
+}
+
 // Parse Nutrition Information
 function parseNutrition(value) {
   if (!value) return [];
-  return value
-    .split(';')
+  const nutrientPattern = /^(serving\s*size|energy(?:\s*value)?|calories?|protein|total\s*carbohydrates?|carbohydrates?|total\s*sugars?|added\s*sugars?|total\s*fat|saturated\s*fat|trans\s*fat|cholesterol|sodium|dietary\s*fib(?:re|er)|calcium|iron|potassium|vitamin\s*[a-z0-9]+)\b/i;
+  const rows = String(value)
+    .split(/[;\n]+/)
     .map((entry) => entry.trim())
     .filter(Boolean)
     .map((entry) => {
-      const percent = entry.match(/\d+(?:[.,]\d+)?\s*%/g)?.join(', ') || '—';
-      const withoutPercent = entry.replace(/\d+(?:[.,]\d+)?\s*%/g, '').trim();
-      const amountStart = withoutPercent.search(/\d/);
-      if (amountStart < 0) return { nutrient: withoutPercent, amount: '—', percent };
+      const label = entry.match(nutrientPattern)?.[0];
+      if (!label) return null;
+      const explicitRda = entry.match(/\|\s*(?:RDA|DV)\s*:?\s*(\d+(?:[.,]\d+)?)\s*%?/i)?.[1];
+      const percentMatches = [...entry.matchAll(/(\d+(?:[.,]\d+)?)\s*%/g)];
+      const percent = explicitRda ? `${explicitRda}%` : percentMatches.length ? `${percentMatches.at(-1)[1]}%` : '—';
+      const withoutPercent = entry.replace(/\|\s*(?:RDA|DV)\s*:?\s*\d+(?:[.,]\d+)?\s*%?/gi, ' ').replace(/\d+(?:[.,]\d+)?\s*%/g, ' ').replace(/\s+/g, ' ').trim();
+      const remainder = withoutPercent.slice(label.length).replace(/^\s*[:-]?\s*/, '');
+      const unitAmount = remainder.match(/\d+(?:[.,]\d+)?\s*(?:kcal|kj|mg|mcg|µg|g|kg|ml|l)\b/i)?.[0];
+      const bareAmount = remainder.match(/^\(?\s*(?:kcal|kj)\)?\s*(\d+(?:[.,]\d+)?)/i)?.[1]
+        || remainder.match(/\d+(?:[.,]\d+)?/)?.[0];
+      const amount = unitAmount || (bareAmount ? `${bareAmount}${/energy|calorie/i.test(label) ? ' kcal' : ''}` : '—');
       return {
-        nutrient: withoutPercent.slice(0, amountStart).trim().replace(/[:.-]+$/, '') || 'Value',
-        amount: withoutPercent.slice(amountStart).trim(),
+        nutrient: label.replace(/\s+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
+        amount,
         percent,
       };
-    });
+    })
+    .filter(Boolean);
+  const unique = new Map();
+  rows.forEach((row) => {
+    const key = row.nutrient.toLowerCase();
+    const score = Number(row.amount !== '—') + Number(row.percent !== '—');
+    if (!unique.has(key) || score > unique.get(key).score) unique.set(key, { ...row, score });
+  });
+  return [...unique.values()].map(({ score: _score, ...row }) => row);
 }
 
 // Structured Nutrition Facts Table

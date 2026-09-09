@@ -114,6 +114,15 @@ def validate_rule(rule: dict[str, Any], request: ValidationRequest) -> dict[str,
     for item in request.evidence:
         by_field[item.field].append(item)
 
+    # Rule 6(2) accepts a consumer contact channel. The UI stores phone and
+    # email separately for usability, so make either one satisfy the combined
+    # legal evidence key instead of producing a contradictory review card.
+    if not by_field.get("consumer_care"):
+        for alias in ("consumer_phone", "consumer_email"):
+            by_field["consumer_care"].extend(
+                item.model_copy(update={"field": "consumer_care"}) for item in by_field.get(alias, [])
+            )
+
     selected = []
     missing: list[str] = []
     low_confidence: list[str] = []

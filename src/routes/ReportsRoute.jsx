@@ -11,12 +11,13 @@ import {
   Plus,
   Search,
   ShieldAlert,
-  ShieldCheck
+  ShieldCheck,
+  Trash2
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import { useAuth } from '../context/auth-context';
-import { getReports, restoreReport } from '../lib/reportStore';
+import { deleteReport, getReports, restoreReport } from '../lib/reportStore';
 
 export default function ReportsRoute() {
   const navigate = useNavigate();
@@ -160,7 +161,7 @@ export default function ReportsRoute() {
             </div>
 
             {/* Active / Archive Toggle */}
-            <button
+            {hasRole('inspector', 'admin') && <button
               onClick={() => setShowArchived(!showArchived)}
               className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
                 showArchived
@@ -170,7 +171,7 @@ export default function ReportsRoute() {
             >
               {showArchived ? <FileCheck className="w-3.5 h-3.5 text-amber-600" /> : <Archive className="w-3.5 h-3.5 text-slate-500" />}
               <span>{showArchived ? 'View Active Reports' : `Archived (${counts.archived})`}</span>
-            </button>
+            </button>}
           </div>
         </div>
       </section>
@@ -329,17 +330,31 @@ export default function ReportsRoute() {
                       {/* Action */}
                       <td className="py-4 px-6 text-right">
                         {showArchived ? (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              restoreReport(r.id);
-                              refresh((x) => x + 1);
-                            }}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-[#0284C7] bg-sky-50 border border-sky-200 hover:bg-sky-100 transition-colors cursor-pointer"
-                          >
-                            <ArchiveRestore className="w-3.5 h-3.5" />
-                            <span>Restore</span>
-                          </button>
+                          <div className="inline-flex items-center gap-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                restoreReport(r.id);
+                                refresh((x) => x + 1);
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-[#0284C7] bg-sky-50 border border-sky-200 hover:bg-sky-100 transition-colors cursor-pointer"
+                            >
+                              <ArchiveRestore className="w-3.5 h-3.5" />
+                              <span>Restore</span>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!window.confirm(`Permanently delete report ${r.id}? This cannot be undone.`)) return;
+                                deleteReport(r.id);
+                                refresh((x) => x + 1);
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete</span>
+                            </button>
+                          </div>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0284C7] group-hover:text-[#0369A1] transition-all">
                             <span>Open Dossier</span>

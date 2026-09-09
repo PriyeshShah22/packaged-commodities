@@ -18,6 +18,8 @@ import { useAuth } from '../context/auth-context';
 import { getBackendHealth } from '../lib/api';
 import { computeDashboard, getReports } from '../lib/reportStore';
 import { parseInspectorName } from '../lib/userFormat';
+import AdminDashboard from './AdminDashboard';
+import ViewerDashboard from './ViewerDashboard';
 
 // Lightweight 60fps Ease-Out Count-Up Animation Hook
 function useCountUp(target, duration = 650) {
@@ -277,7 +279,7 @@ function KpiCard({ label, value, icon: Icon, colorStyles, badgeText, subtitle, a
   );
 }
 
-export default function DashboardPlaceholder() {
+export function InspectorDashboard() {
   const navigate = useNavigate();
   const { user, hasRole } = useAuth();
   const reports = useMemo(() => getReports(), []);
@@ -722,6 +724,13 @@ export default function DashboardPlaceholder() {
       </footer>
     </AppShell>
   );
+}
+
+export default function DashboardPlaceholder() {
+  const { hasRole } = useAuth();
+  if (hasRole('admin')) return <AdminDashboard />;
+  if (hasRole('viewer')) return <ViewerDashboard />;
+  return <InspectorDashboard />;
 }
 
 

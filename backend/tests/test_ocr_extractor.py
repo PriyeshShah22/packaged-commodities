@@ -137,6 +137,74 @@ def test_maps_responsible_party_contact_fssai_and_generic_product_separately():
     assert fields["consumer_email"]["value"] == "customercare@creampot.in"
 
 
+def test_maps_fssai_value_when_ocr_splits_caption_and_number():
+    fields = extract_declarations([
+        line("FSSAI Lic. No.", y=10),
+        line("11522997000407", y=32),
+        line("8906082371231", y=80),
+    ])
+    assert fields["fssai_license"]["value"] == "11522997000407"
+    assert fields["barcode"]["value"] == "8906082371231"
+
+
+def test_qr_detector_payload_is_retained_as_a_structured_field():
+    fields = extract_declarations([
+        {**line("QR Code: https://example.test/product/42"), "source_type": "qr_detector"},
+    ])
+    assert fields["qr_code"]["value"] == "https://example.test/product/42"
+
+
+def test_address_does_not_include_nearby_party_or_qr_instructions():
+    def box(text, x, y, width=300):
+        return {"text": text, "confidence": .96, "image_id": "BACK", "bbox": [x, y, x + width, y + 24]}
+
+    fields = extract_declarations([
+        box("Manufactured by: For manufacturing unit address", 600, 20, 390),
+        box("Marketed by: Example Foods Pvt. Ltd.", 20, 100, 420),
+        box("701B, Commerce Chamber, 5 New Marine Line", 20, 132, 470),
+        box("Mumbai, Maharashtra 400020", 20, 164, 310),
+        box("scan the QR code", 20, 190, 220),
+    ])
+    assert fields["responsible_party_address"]["value"] == "701B, Commerce Chamber, 5 New Marine Line Mumbai, Maharashtra 400020"
+
+
+def test_standalone_postal_line_maps_and_normalizes_spaced_pin_code():
+    fields = extract_declarations([
+        line("Kolihire, Tal Purandar, Dist. Pune 412 303.", confidence=.94, y=30),
+    ])
+    assert fields["responsible_party_address"]["value"] == "Kolihire, Tal Purandar, Dist. Pune 412303"
+
+
+def test_expiry_date_is_not_promoted_to_batch_number():
+    fields = extract_declarations([
+        line("Batch No.", y=10),
+        line("23-02-2027", y=30),
+        line("Best Before: 23-02-2027", y=50),
+    ])
+    assert "batch_number" not in fields
+    assert fields["best_before_or_use_by"]["value"] == "23/02/2027"
+
+
+def test_complete_live_price_beats_confident_clipped_fragment():
+    fields = extract_declarations([
+        line("MRP ₹220.00", confidence=.78, image_id="CAM-PRECISION"),
+        line("MRP ₹2", confidence=.99, image_id="CAM-FAST"),
+    ])
+    assert fields["mrp"]["value"] == "MRP ₹220.00"
+
+
+def test_nutrition_declared_amount_and_rda_columns_are_preserved():
+    def cell(text, x, y, width=100):
+        return {"text": text, "confidence": .96, "image_id": "NUTRITION", "bbox": [x, y, x + width, y + 22]}
+
+    fields = extract_declarations([
+        cell("Nutritional Information", 10, 10, 250),
+        cell("Nutrient", 10, 40), cell("Per 100 g", 220, 40), cell("% RDA", 420, 40),
+        cell("Total Sugar", 10, 70, 150), cell("22.16 g", 220, 70), cell("16.75", 420, 70),
+    ])
+    assert "Total Sugar 22.16 g | RDA 16.75" in fields["nutrition_information"]["value"]
+
+
 def test_repairs_common_dot_matrix_price_date_and_batch_confusions():
     assert _normalize("mrp", "Bs:220:00")[0] == "MRP ₹220.00 inclusive of all taxes"
     assert _normalize("mrp", "No:")[0] == ""

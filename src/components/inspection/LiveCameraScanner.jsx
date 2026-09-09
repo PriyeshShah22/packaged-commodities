@@ -7,13 +7,15 @@ import {
   Zap
 } from 'lucide-react';
 
-export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
+export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, busy }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const intervalRef = useRef(null);
   const busyRef = useRef(busy);
   const onCaptureRef = useRef(onCapture);
+  const onCodeDetectedRef = useRef(onCodeDetected);
+  const detectedCodesRef = useRef(new Set());
   const previousSampleRef = useRef(null);
   const acceptedFramesRef = useRef([]);
   const captureInFlightRef = useRef(false);
@@ -42,6 +44,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
   useEffect(() => {
     onCaptureRef.current = onCapture;
   }, [onCapture]);
+
+  useEffect(() => {
+    onCodeDetectedRef.current = onCodeDetected;
+  }, [onCodeDetected]);
 
   const start = async () => {
     setError('');
@@ -150,21 +156,44 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     // Automatic frames prioritize a fast OCR response. 1280px remains large
     // enough for the stamped MRP/date pass while reducing pixels sent through
     // the detector. Manual evidence capture keeps the higher-quality path.
-    const maxDimension = automatic ? 1280 : 1800;
+    const maxDimension = automatic ? 1600 : 1800;
     const scale = Math.min(1, maxDimension / Math.max(source.width, source.height));
     canvas.width = Math.round(source.width * scale);
     canvas.height = Math.round(source.height * scale);
     const context = canvas.getContext('2d');
     context.drawImage(video, source.x, source.y, source.width, source.height, 0, 0, canvas.width, canvas.height);
 
+    // Chromium exposes its native barcode/QR detector to the browser. It is
+    // independent of OCR and therefore recovers codes even when nearby print
+    // is tiny, stylised, or dot-matrix. Unsupported browsers simply continue
+    // with the normal OCR path.
+    if ('BarcodeDetector' in window && onCodeDetectedRef.current) {
+      try {
+        const requestedFormats = ['qr_code', 'ean_8', 'ean_13', 'upc_a', 'upc_e', 'code_128', 'itf'];
+        const supportedFormats = window.BarcodeDetector.getSupportedFormats ? await window.BarcodeDetector.getSupportedFormats() : requestedFormats;
+        const formats = requestedFormats.filter((format) => supportedFormats.includes(format));
+        if (!formats.length) throw new Error('No supported barcode formats');
+        const detector = new window.BarcodeDetector({ formats });
+        const codes = await detector.detect(canvas);
+        for (const code of codes) {
+          const rawValue = String(code.rawValue || '').trim();
+          const key = `${code.format}:${rawValue}`;
+          if (rawValue && !detectedCodesRef.current.has(key)) {
+            detectedCodesRef.current.add(key);
+            await onCodeDetectedRef.current({ value: rawValue, format: code.format });
+          }
+        }
+      } catch { /* Barcode detection is an enhancement; OCR remains available. */ }
+    }
+
     captureInFlightRef.current = true;
     try {
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', automatic ? 0.82 : 0.9));
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
       if (blob) {
         console.debug('[Live OCR] image captured', { bytes: blob.size, width: canvas.width, height: canvas.height });
         const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
         setCaptureStatus(automatic ? 'Reading this live frame…' : 'Reading captured evidence…');
-        const succeeded = await onCaptureRef.current(file, automatic);
+        const succeeded = await onCaptureRef.current(file, automatic, false);
         if (automatic && succeeded !== false && acceptedCandidate) {
           acceptedFramesRef.current = [
             ...acceptedFramesRef.current.filter((accepted) => {
@@ -174,7 +203,14 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
             acceptedCandidate,
           ].slice(-6);
         }
-        setCaptureStatus(succeeded === false ? 'No reliable text in that frame — keep scanning.' : 'Live text retained — show another side when ready.');
+        if (automatic && succeeded !== false) {
+          setCaptureStatus('Quick read retained — refining small and dotted text…');
+          void onCaptureRef.current(file, true, true).then((refined) => {
+            setCaptureStatus(refined === false ? 'Quick read retained — use Capture Evidence for a clearer precision read.' : 'Precision read retained — show another side when ready.');
+          });
+        } else {
+          setCaptureStatus(succeeded === false ? 'No reliable text in that frame — keep scanning.' : 'Live text retained — show another side when ready.');
+        }
       }
     } finally {
       captureInFlightRef.current = false;
@@ -207,6 +243,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     ['Country of origin', ['country_of_origin']],
     ['Batch / lot', ['batch_number']],
     ['Barcode / GTIN', ['barcode']],
+    ['QR code', ['qr_code']],
     ['Ingredients', ['ingredients']],
     ['Nutrition', ['nutrition_information']],
   ].map(([label, fields]) => ({
@@ -372,7 +409,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
                 key={label}
                 className="rounded-xl border border-slate-800/80 bg-slate-900/50 px-3 py-2"
               >
-                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+                <p className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-slate-400"><span>{label}</span><span className={`ml-auto rounded-full px-1.5 py-0.5 ${Number(evidence.confidence || 0) >= .8 ? 'bg-emerald-950 text-emerald-300' : 'bg-amber-950 text-amber-300'}`}>{Number(evidence.confidence || 0) >= .8 ? 'retained' : 'candidate'} · {Math.round(Number(evidence.confidence || 0) * 100)}%</span></p>
                 <p className="text-sm text-white mt-1 break-words">{evidence.value}</p>
               </div>
             ))}
