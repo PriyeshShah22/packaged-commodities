@@ -158,25 +158,590 @@ export default function NewInspectionRoute() {
   const downloadBulk = async () => { if (!completed.length) return; setBulkDownloading(true); try { const blob = await downloadReportPdf({ id: `BATCH-${products[0].key.split('-')[0]}`, reports: completed }, token); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `PackMetrix-bulk-${Date.now()}.pdf`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); } finally { setBulkDownloading(false); } };
   const quality = useMemo(() => active.images.length ? `${active.images.filter((image) => image.quality === 'sufficient').length}/${active.images.length} panels meet the resolution screen` : 'No evidence panels for this product', [active.images]);
   const visible = active.results?.results?.filter((item) => item.outcome !== 'NOT_APPLICABLE') || [];
-  const actions = completed.length ? <button onClick={downloadBulk} disabled={bulkDownloading} className="flex items-center gap-2 bg-slate-950 text-white px-4 py-2.5 rounded-xl text-sm font-bold"><Download className="w-4 h-4" />{bulkDownloading ? 'Building…' : `Bulk report (${completed.length})`}</button> : null;
+  const actions = completed.length ? (
+    <button
+      onClick={downloadBulk}
+      disabled={bulkDownloading}
+      className="flex items-center gap-2 bg-[#0B1224] hover:bg-[#131F37] text-white px-4.5 py-2.5 rounded-xl text-xs sm:text-sm font-bold shadow-xs hover-lift transition-all disabled:opacity-50 cursor-pointer"
+    >
+      <Download className="w-4 h-4 text-sky-400" />
+      {bulkDownloading ? 'Building Dossier…' : `Bulk Dossier (${completed.length})`}
+    </button>
+  ) : null;
 
-  return <AppShell title="Batch product inspection" eyebrow="MULTI-PRODUCT AI SCAN" actions={inspectionMode === 'grouped' ? actions : null}><div className="space-y-6">
-    <section className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm"><p className="text-xs font-bold text-slate-500 mb-2">INSPECTION MODE</p><div className="inline-flex bg-slate-100 rounded-xl p-1"><button onClick={() => setInspectionMode('grouped')} className={`px-4 py-2 rounded-lg text-sm font-bold ${inspectionMode === 'grouped' ? 'bg-white shadow text-sky-700' : 'text-slate-500'}`}>Single / Grouped Inspection</button><button onClick={() => setInspectionMode('bulk')} className={`px-4 py-2 rounded-lg text-sm font-bold ${inspectionMode === 'bulk' ? 'bg-white shadow text-sky-700' : 'text-slate-500'}`}>Bulk Inspection</button></div></section>
-    {inspectionMode === 'bulk' ? <BulkInspectionPanel token={token} user={user} /> : <>
-    <section className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm"><div className="flex flex-wrap gap-2 items-center"><span className="text-xs font-bold text-slate-500 mr-2">PRODUCT GROUPS</span>{products.map((product) => <button key={product.key} onClick={() => setActiveKey(product.key)} className={`group flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-bold border ${product.key === active.key ? 'bg-sky-50 text-sky-800 border-sky-300' : 'bg-white text-slate-600 border-slate-200'}`}><span>{product.details.productName || `Product ${product.number}`}</span><span className={`w-2 h-2 rounded-full ${product.report ? 'bg-emerald-500' : product.images.length ? 'bg-amber-500' : 'bg-slate-300'}`} />{products.length > 1 && <span onClick={(event) => { event.stopPropagation(); removeProduct(product.key); }} className="opacity-40 group-hover:opacity-100"><X className="w-3.5 h-3.5" /></span>}</button>)}<button onClick={addProduct} className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-dashed border-sky-300 text-sky-700 text-sm font-bold"><Plus className="w-4 h-4" />Add product</button></div><p className="text-xs text-slate-500 mt-3">Keep every product’s front, back, and side panels inside its own tab. The system never merges text across product groups.</p></section>
+  return (
+    <AppShell
+      title="Package Intake & Inspection"
+      eyebrow="AI STATUTORY VERIFICATION"
+      actions={inspectionMode === 'grouped' ? actions : null}
+    >
+      <div className="space-y-6 max-w-6xl mx-auto">
+        {/* Inspection Mode Selector */}
+        <section className="bg-white border border-[#E8E2D5] rounded-3xl p-5 sm:p-6 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono font-bold tracking-widest text-[#0284C7] bg-sky-50 border border-sky-200/60 px-2.5 py-0.5 rounded-full uppercase">
+                  Workflow Architecture
+                </span>
+              </div>
+              <h2 className="text-base sm:text-lg font-bold text-[#0B1224] mt-1.5">
+                Select Intake Mode
+              </h2>
+              <p className="text-xs text-[#8C8275] mt-0.5">
+                Single or grouped package inspection with multi-panel OCR, or batch bulk analysis
+              </p>
+            </div>
+            <div className="inline-flex bg-[#F4EFE6] rounded-2xl p-1.5 border border-[#E8E2D5] self-start sm:self-auto shrink-0">
+              <button
+                onClick={() => setInspectionMode('grouped')}
+                className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+                  inspectionMode === 'grouped'
+                    ? 'bg-[#0B1224] text-white shadow-sm'
+                    : 'text-[#475569] hover:text-[#0B1224]'
+                }`}
+              >
+                Single / Grouped Intake
+              </button>
+              <button
+                onClick={() => setInspectionMode('bulk')}
+                className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+                  inspectionMode === 'bulk'
+                    ? 'bg-[#0B1224] text-white shadow-sm'
+                    : 'text-[#475569] hover:text-[#0B1224]'
+                }`}
+              >
+                Bulk Batch Processing
+              </button>
+            </div>
+          </div>
+        </section>
 
-    <Section number="1" title={`Identify Product ${active.number}`} subtitle="The name and barcode may be auto-filled from this product’s images."><div className="grid sm:grid-cols-2 gap-4"><Text label="Product ID / barcode" value={active.details.productId} onChange={(value) => update(active.key, { details: { ...active.details, productId: value } })} placeholder="Auto-filled or enter identifier" /><Text label="Product name" value={active.details.productName} onChange={(value) => update(active.key, { details: { ...active.details, productName: value } })} placeholder="e.g. Yellow Chips / Chocolate Desire" /></div><details className="mt-5 group"><summary className="cursor-pointer flex items-center gap-2 text-sm font-bold text-slate-600"><ChevronDown className="w-4 h-4 group-open:rotate-180" />Advanced legal applicability</summary><p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-3 mt-3">Unknown facts remain REVIEW; the image alone cannot prove sales channel or every exception.</p><div className="grid sm:grid-cols-3 gap-4 mt-4"><Select label="Category" value={active.context.category} onChange={(value) => update(active.key, { context: { ...active.context, category: value } })} options={[['unknown','Auto / unknown'],['food','Food'],['beverage','Beverage'],['personal_care','Personal care'],['household','Household'],['other','Other']]} /><Select label="Origin" value={active.context.origin} onChange={(value) => update(active.key, { context: { ...active.context, origin: value } })} options={[['unknown','Auto / unknown'],['domestic','Manufactured in India'],['imported','Imported']]} /><Select label="Sales context" value={active.context.salesContext} onChange={(value) => update(active.key, { context: { ...active.context, salesContext: value } })} options={[['retail','Retail package'],['ecommerce','E-commerce'],['wholesale','Wholesale'],['unknown','Unknown']]} /></div><div className="mt-4 flex flex-wrap gap-4">{[['date','Date declaration applies'],['perishable','May become unfit for consumption'],['unitPrice','Unit sale price applies']].map(([key,label]) => <label key={key} className="text-sm flex gap-2"><input type="checkbox" checked={active.conditions[key]} onChange={(event) => update(active.key, { conditions: { ...active.conditions, [key]: event.target.checked } })} />{label}</label>)}</div></details></Section>
+        {inspectionMode === 'bulk' ? (
+          <BulkInspectionPanel token={token} user={user} />
+        ) : (
+          <>
+            {/* Product Groups Selector */}
+            <section className="bg-white border border-[#E8E2D5] rounded-3xl p-5 sm:p-6 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
+              <div className="flex flex-wrap gap-2.5 items-center">
+                <span className="text-[10px] font-mono font-bold text-[#8C8275] uppercase tracking-wider mr-2">
+                  Active Packages:
+                </span>
+                {products.map((product) => {
+                  const isSelected = product.key === active.key;
+                  return (
+                    <button
+                      key={product.key}
+                      onClick={() => setActiveKey(product.key)}
+                      className={`group flex items-center gap-2.5 rounded-xl px-3.5 py-2 text-xs sm:text-sm font-bold border transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#0B1224] text-white border-[#0B1224] shadow-sm'
+                          : 'bg-[#FAF8F5] text-slate-700 border-[#E8E2D5] hover:bg-[#F4EFE6] hover:border-[#D6CEBE]'
+                      }`}
+                    >
+                      <span>{product.details.productName || `Product ${product.number}`}</span>
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          product.report
+                            ? 'bg-emerald-400'
+                            : product.images.length
+                            ? 'bg-amber-400'
+                            : isSelected
+                            ? 'bg-slate-500'
+                            : 'bg-slate-300'
+                        }`}
+                      />
+                      {products.length > 1 && (
+                        <span
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeProduct(product.key);
+                          }}
+                          className="opacity-40 hover:opacity-100 transition-opacity p-0.5 ml-1"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={addProduct}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-dashed border-[#0284C7] text-[#0284C7] hover:bg-sky-50/60 text-xs sm:text-sm font-bold transition-all cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Package
+                </button>
+              </div>
+              <p className="text-xs text-[#8C8275] mt-3">
+                Keep every product’s front, back, and side panels inside its own tab. Optical OCR text is isolated per product group.
+              </p>
+            </section>
 
-    <Section number="2" title={`Capture panels for Product ${active.number}`} subtitle="Add only this product’s front, back, side, lid, or bottom images."><div className="inline-flex bg-slate-100 rounded-xl p-1"><button onClick={() => update(active.key, { mode: 'upload' })} className={`px-4 py-2 rounded-lg text-sm font-bold flex gap-2 ${active.mode === 'upload' ? 'bg-white shadow text-sky-700' : 'text-slate-500'}`}><Upload className="w-4 h-4" />Upload</button><button onClick={() => update(active.key, { mode: 'camera' })} className={`px-4 py-2 rounded-lg text-sm font-bold flex gap-2 ${active.mode === 'camera' ? 'bg-white shadow text-sky-700' : 'text-slate-500'}`}><Camera className="w-4 h-4" />Live camera</button></div>{active.mode === 'upload' ? <label className={`mt-4 min-h-36 border-2 border-dashed rounded-2xl grid place-items-center text-center cursor-pointer ${active.ocrLoading ? 'opacity-60 pointer-events-none' : 'border-slate-300 hover:border-sky-400 bg-slate-50'}`}><div>{active.ocrLoading ? <Loader2 className="w-7 h-7 mx-auto animate-spin text-sky-700" /> : <Upload className="w-7 h-7 mx-auto text-sky-700" />}<p className="font-bold text-sm mt-2">{active.ocrLoading ? 'Orienting and mapping label text…' : 'Add front, back and side photographs'}</p><p className="text-xs text-slate-500 mt-1">Up to 12 panels for Product {active.number}</p></div><input type="file" accept="image/*" multiple onChange={addImages} className="hidden" /></label> : <div className="mt-4"><LiveCameraScanner onCapture={cameraCapture} ocrData={active.ocrData} busy={active.ocrLoading} /></div>}{active.images.length > 0 && <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-6 gap-3 mt-5">{active.images.map((image) => <div key={image.id} className="border border-slate-200 rounded-xl overflow-hidden relative"><img src={image.url} alt={image.file.name} className="w-full h-24 object-cover" /><button onClick={() => removeImage(image.id)} className="absolute top-1.5 right-1.5 bg-slate-950/80 text-white p-1 rounded-full"><X className="w-3 h-3" /></button><div className="p-2 text-[10px]"><b className="font-mono">{image.id}</b><p className="truncate text-slate-500">{image.file.name}</p></div></div>)}</div>}<p className="mt-4 text-xs text-slate-500 flex gap-2"><FileImage className="w-4 h-4" />{quality}</p>{active.ocrError && <p className="mt-3 text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3">{active.ocrError}</p>}</Section>
+            {/* Section 1: Identify Product */}
+            <Section
+              number="1"
+              title={`Identify Product ${active.number}`}
+              subtitle="Product name and barcode may be auto-detected from uploaded panels or entered manually."
+            >
+              <div className="grid sm:grid-cols-2 gap-4">
+                <Text
+                  label="Product ID / Barcode (GTIN)"
+                  value={active.details.productId}
+                  onChange={(value) =>
+                    update(active.key, { details: { ...active.details, productId: value } })
+                  }
+                  placeholder="Auto-filled from barcode or enter manually"
+                />
+                <Text
+                  label="Product Name"
+                  value={active.details.productName}
+                  onChange={(value) =>
+                    update(active.key, { details: { ...active.details, productName: value } })
+                  }
+                  placeholder="e.g. Yellow Crisps / Chocolate Truffles"
+                />
+              </div>
 
-    <Section number="3" title="Review extracted declarations" subtitle="The strongest field-specific values are mapped below; the complete OCR transcript remains retained."><div className="flex justify-end mb-4"><button type="button" onClick={clearExtractedText} disabled={!active.ocrData} className="text-xs font-bold text-rose-700 border border-rose-200 rounded-lg px-3 py-2 disabled:opacity-40">Clear extracted text</button></div><div className="grid md:grid-cols-2 gap-4">{Object.entries(LABELS).map(([field,label]) => <Text key={field} label={label} value={active.declarations[field]} evidence={active.ocrData?.fields?.[field]} onChange={(value) => update(active.key, { declarations: { ...active.declarations, [field]: value } })} placeholder="Not reliably detected" />)}</div><label className="mt-5 flex gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4"><input type="checkbox" checked={active.coverageComplete} onChange={(event) => update(active.key, { coverageComplete: event.target.checked })} /><span><b className="text-sm">I have scanned all relevant package surfaces for Product {active.number}</b><p className="text-xs text-amber-800 mt-1">Until confirmed, an undetected declaration remains Needs Review and is not treated as absent or non-compliant.</p></span></label></Section>
+              {/* Advanced Applicability Drawer */}
+              <details className="mt-5 group border border-[#E8E2D5] rounded-2xl bg-[#FAF8F5] p-4.5">
+                <summary className="cursor-pointer flex items-center justify-between text-xs sm:text-sm font-bold text-slate-700 select-none">
+                  <span className="flex items-center gap-2">
+                    <ChevronDown className="w-4 h-4 group-open:rotate-180 transition-transform duration-200 text-[#8C8275]" />
+                    Advanced Statutory Applicability & Context
+                  </span>
+                  <span className="text-[10px] font-mono text-[#8C8275] bg-white border border-[#E8E2D5] px-2 py-0.5 rounded-md">
+                    LM RULES 2011
+                  </span>
+                </summary>
 
-    {active.error && <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-sm text-rose-800 flex gap-2"><AlertCircle className="w-5 h-5" />{active.error}</div>}<button onClick={analyze} disabled={active.loading || active.ocrLoading} className="w-full bg-slate-950 hover:bg-sky-800 text-white rounded-2xl py-4 font-black flex justify-center gap-2 disabled:opacity-50">{active.loading ? <Loader2 className="animate-spin" /> : <ScanLine />}Analyze Product {active.number}</button>
-    {active.results && <section id="analysis-results" className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm"><div className="flex justify-between"><div><p className="text-xs font-bold text-sky-700 tracking-widest">PRODUCT {active.number} ASSESSED</p><h2 className="text-2xl font-black mt-1">Human-readable findings</h2><p className="text-sm text-slate-500 mt-1">Assessment: {active.results.counts.FAIL ? 'Potential issue detected' : active.results.counts.REVIEW ? 'Review required' : 'Pass'}</p></div><button onClick={() => navigate(`/reports/${active.report?.id}`)} className="text-sm font-bold text-sky-700">Open report →</button></div><div className="grid grid-cols-3 gap-3 mt-5">{[['Passed',active.results.counts.PASS,'text-emerald-700 bg-emerald-50'],['Potential violations',active.results.counts.FAIL,'text-rose-700 bg-rose-50'],['Need verification',active.results.counts.REVIEW,'text-amber-700 bg-amber-50']].map(([label,value,color]) => <div key={label} className={`rounded-xl p-4 ${color}`}><p className="text-2xl font-black">{value}</p><p className="text-xs font-bold">{label}</p></div>)}</div><div className="mt-5 divide-y divide-slate-100">{visible.map((item) => <div key={item.rule_id} className="py-4 flex gap-3">{item.outcome === 'PASS' ? <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" /> : <AlertCircle className={`w-5 h-5 shrink-0 ${item.outcome === 'FAIL' ? 'text-rose-600' : 'text-amber-600'}`} />}<div><p className="font-bold text-sm">{item.requirement} — {item.outcome === 'PASS' ? 'Passed' : item.outcome === 'FAIL' ? 'Potential Issue' : 'Review Required'}</p><p className="text-sm text-slate-600 mt-1">{item.reason}</p><p className="text-xs text-slate-400 mt-1">Legal reference: {item.rule_reference}</p></div></div>)}</div></section>}
-    </>}
-  </div></AppShell>;
+                <p className="text-xs text-amber-900 bg-amber-50/80 border border-amber-200/70 rounded-xl p-3 mt-3">
+                  Unknown facts remain marked as <b>REVIEW</b>; an image alone cannot prove sales channel or every statutory exception.
+                </p>
+
+                <div className="grid sm:grid-cols-3 gap-4 mt-4">
+                  <Select
+                    label="Category"
+                    value={active.context.category}
+                    onChange={(value) =>
+                      update(active.key, { context: { ...active.context, category: value } })
+                    }
+                    options={[
+                      ['unknown', 'Auto / Unknown'],
+                      ['food', 'Food Commodity'],
+                      ['beverage', 'Beverage'],
+                      ['personal_care', 'Personal Care / Cosmetics'],
+                      ['household', 'Household / Cleaning'],
+                      ['other', 'Other Commodity'],
+                    ]}
+                  />
+                  <Select
+                    label="Statutory Origin"
+                    value={active.context.origin}
+                    onChange={(value) =>
+                      update(active.key, { context: { ...active.context, origin: value } })
+                    }
+                    options={[
+                      ['unknown', 'Auto / Unknown'],
+                      ['domestic', 'Manufactured in India'],
+                      ['imported', 'Imported Goods'],
+                    ]}
+                  />
+                  <Select
+                    label="Sales Context"
+                    value={active.context.salesContext}
+                    onChange={(value) =>
+                      update(active.key, { context: { ...active.context, salesContext: value } })
+                    }
+                    options={[
+                      ['retail', 'Retail Package'],
+                      ['ecommerce', 'E-Commerce Marketplace'],
+                      ['wholesale', 'Wholesale / Institutional'],
+                      ['unknown', 'Unknown Context'],
+                    ]}
+                  />
+                </div>
+
+                <div className="mt-4 pt-4 border-t border-[#E8E2D5] flex flex-wrap gap-5">
+                  {[
+                    ['date', 'Date declaration applies (Mfg/Pack/Import)'],
+                    ['perishable', 'Perishable commodity (unfit after time)'],
+                    ['unitPrice', 'Unit sale price applies (Rule 6(11))'],
+                  ].map(([key, label]) => (
+                    <label key={key} className="text-xs sm:text-sm flex items-center gap-2.5 text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={active.conditions[key]}
+                        onChange={(event) =>
+                          update(active.key, {
+                            conditions: { ...active.conditions, [key]: event.target.checked },
+                          })
+                        }
+                        className="w-4 h-4 rounded border-[#D8D0C0] text-[#0284C7] focus:ring-[#0284C7]/20"
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            </Section>
+
+            {/* Section 2: Capture Panels */}
+            <Section
+              number="2"
+              title={`Capture Panels for Product ${active.number}`}
+              subtitle="Upload or scan high-resolution front, back, side, top, and bottom packaging panels."
+            >
+              <div className="inline-flex bg-[#F4EFE6] rounded-2xl p-1.5 border border-[#E8E2D5]">
+                <button
+                  onClick={() => update(active.key, { mode: 'upload' })}
+                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                    active.mode === 'upload'
+                      ? 'bg-[#0B1224] text-white shadow-sm'
+                      : 'text-[#475569] hover:text-[#0B1224]'
+                  }`}
+                >
+                  <Upload className="w-4 h-4" />
+                  Upload Panels
+                </button>
+                <button
+                  onClick={() => update(active.key, { mode: 'camera' })}
+                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                    active.mode === 'camera'
+                      ? 'bg-[#0B1224] text-white shadow-sm'
+                      : 'text-[#475569] hover:text-[#0B1224]'
+                  }`}
+                >
+                  <Camera className="w-4 h-4" />
+                  Live Optical Scanner
+                </button>
+              </div>
+
+              {active.mode === 'upload' ? (
+                <label
+                  className={`mt-4 min-h-36 border-2 border-dashed rounded-3xl grid place-items-center text-center cursor-pointer transition-all duration-200 ${
+                    active.ocrLoading
+                      ? 'opacity-60 pointer-events-none bg-[#F4EFE6] border-[#D8D0C0]'
+                      : 'border-[#D8D0C0] hover:border-[#0284C7] bg-[#FAF8F5] hover:bg-sky-50/20'
+                  }`}
+                >
+                  <div className="p-8">
+                    {active.ocrLoading ? (
+                      <Loader2 className="w-8 h-8 mx-auto animate-spin text-[#0284C7]" />
+                    ) : (
+                      <Upload className="w-8 h-8 mx-auto text-[#0284C7]" />
+                    )}
+                    <p className="font-bold text-sm text-[#0B1224] mt-3">
+                      {active.ocrLoading
+                        ? 'Extracting and mapping statutory text via OCR…'
+                        : 'Drop or browse front, back, and side panel photographs'}
+                    </p>
+                    <p className="text-xs text-[#8C8275] mt-1 font-mono">
+                      Accepts JPG, PNG, WEBP (up to 12 panels for Product {active.number})
+                    </p>
+                  </div>
+                  <input type="file" accept="image/*" multiple onChange={addImages} className="hidden" />
+                </label>
+              ) : (
+                <div className="mt-4">
+                  <LiveCameraScanner
+                    onCapture={cameraCapture}
+                    ocrData={active.ocrData}
+                    busy={active.ocrLoading}
+                  />
+                </div>
+              )}
+
+              {/* Uploaded Panel Cards */}
+              {active.images.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-6 gap-3.5 mt-5">
+                  {active.images.map((image) => (
+                    <div
+                      key={image.id}
+                      className="border border-[#E8E2D5] rounded-2xl overflow-hidden relative group bg-[#FAF8F5] shadow-2xs"
+                    >
+                      <img src={image.url} alt={image.file.name} className="w-full h-28 object-cover" />
+                      <button
+                        onClick={() => removeImage(image.id)}
+                        className="absolute top-2 right-2 bg-slate-900/80 hover:bg-rose-600 text-white p-1.5 rounded-full transition-colors cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                      <div className="p-2.5 bg-white border-t border-[#E8E2D5]">
+                        <span className="font-mono text-[10px] font-bold text-[#0284C7] bg-sky-50 px-1.5 py-0.5 rounded">
+                          {image.id}
+                        </span>
+                        <p className="truncate text-slate-500 text-[11px] mt-1">{image.file.name}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 flex items-center justify-between flex-wrap gap-2 text-xs text-[#8C8275]">
+                <div className="flex items-center gap-2 font-mono">
+                  <FileImage className="w-4 h-4 text-[#0284C7]" />
+                  <span>{quality}</span>
+                </div>
+                {active.images.length > 0 && (
+                  <span className="font-mono text-[11px]">
+                    {active.images.length} of 12 slots utilized
+                  </span>
+                )}
+              </div>
+
+              {active.ocrError && (
+                <p className="mt-3 text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3.5">
+                  {active.ocrError}
+                </p>
+              )}
+            </Section>
+
+            {/* Section 3: Review Extracted Declarations */}
+            <Section
+              number="3"
+              title="Review Extracted Declarations"
+              subtitle="The strongest field-specific values are auto-mapped below; full OCR transcripts remain retained in the audit record."
+            >
+              <div className="flex justify-between items-center mb-5 pb-3 border-b border-[#E8E2D5]">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[#8C8275] font-mono">
+                    Mandatory & Optional Declarations under Rule 6
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearExtractedText}
+                  disabled={!active.ocrData}
+                  className="text-xs font-bold text-rose-700 hover:text-rose-800 border border-rose-200/80 hover:bg-rose-50/50 rounded-xl px-3 py-1.5 disabled:opacity-40 transition-all cursor-pointer"
+                >
+                  Clear extracted text
+                </button>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                {Object.entries(LABELS).map(([field, label]) => (
+                  <Text
+                    key={field}
+                    label={label}
+                    value={active.declarations[field]}
+                    evidence={active.ocrData?.fields?.[field]}
+                    onChange={(value) =>
+                      update(active.key, {
+                        declarations: { ...active.declarations, [field]: value },
+                      })
+                    }
+                    placeholder="Not reliably detected in scanned panels"
+                  />
+                ))}
+              </div>
+
+              {/* Full Panel Scanning Assurance Callout */}
+              <label className="mt-6 flex items-start gap-3.5 bg-[#FAF8F5] border border-[#E8E2D5] rounded-2xl p-4.5 cursor-pointer shadow-2xs">
+                <input
+                  type="checkbox"
+                  checked={active.coverageComplete}
+                  onChange={(event) =>
+                    update(active.key, { coverageComplete: event.target.checked })
+                  }
+                  className="w-4 h-4 mt-0.5 rounded border-[#D8D0C0] text-[#0284C7] focus:ring-[#0284C7]/20"
+                />
+                <span>
+                  <b className="text-sm text-[#0B1224]">
+                    I confirm having scanned all relevant package surfaces for Product {active.number}
+                  </b>
+                  <p className="text-xs text-[#8C8275] mt-1">
+                    Until confirmed, undetected mandatory declarations will remain marked as <b>NEEDS REVIEW</b> rather than automatically declared non-compliant.
+                  </p>
+                </span>
+              </label>
+            </Section>
+
+            {/* Error Message */}
+            {active.error && (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4.5 text-sm text-rose-800 flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 shrink-0 text-rose-600" />
+                <span>{active.error}</span>
+              </div>
+            )}
+
+            {/* Primary Analysis Trigger CTA */}
+            <button
+              onClick={analyze}
+              disabled={active.loading || active.ocrLoading}
+              className="w-full bg-[#0B1224] hover:bg-[#131F37] active:scale-[0.99] text-white rounded-2xl py-4.5 px-6 font-bold shadow-[0_4px_20px_rgba(11,18,36,0.25)] flex items-center justify-center gap-3 transition-all cursor-pointer text-base hover-lift disabled:opacity-50"
+            >
+              {active.loading ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin text-sky-400" />
+                  <span>Evaluating Statutory Rules for Product {active.number}…</span>
+                </>
+              ) : (
+                <>
+                  <ScanLine className="w-5 h-5 text-sky-400" />
+                  <span>Evaluate Compliance — Product {active.number}</span>
+                </>
+              )}
+            </button>
+
+            {/* Assessment Findings Section */}
+            {active.results && (
+              <section
+                id="analysis-results"
+                className="bg-white border border-[#E8E2D5] rounded-3xl p-6 sm:p-8 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#E8E2D5]">
+                  <div>
+                    <span className="text-[10px] font-mono font-bold tracking-widest text-[#0284C7] bg-sky-50 border border-sky-200/60 px-2.5 py-0.5 rounded-full uppercase">
+                      Assessment Complete
+                    </span>
+                    <h2 className="text-xl sm:text-2xl font-black text-[#0B1224] mt-1.5">
+                      Statutory Findings Summary
+                    </h2>
+                    <p className="text-xs sm:text-sm text-[#8C8275] mt-1">
+                      Evaluated under Legal Metrology (Packaged Commodities) Rules, 2011
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => navigate(`/reports/${active.report?.id}`)}
+                    className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-[#0284C7] hover:text-[#0369A1] self-start sm:self-auto cursor-pointer"
+                  >
+                    <span>Open Full Audit Dossier</span>
+                    <span>→</span>
+                  </button>
+                </div>
+
+                {/* Score Summary Metrics */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 mt-6">
+                  {[
+                    ['Passed Rules', active.results.counts.PASS, 'text-emerald-700 bg-emerald-50/80 border-emerald-200/60'],
+                    ['Potential Violations', active.results.counts.FAIL, 'text-rose-700 bg-rose-50/80 border-rose-200/60'],
+                    ['Needs Verification', active.results.counts.REVIEW, 'text-amber-700 bg-amber-50/80 border-amber-200/60'],
+                  ].map(([label, value, style]) => (
+                    <div key={label} className={`rounded-2xl p-4.5 border ${style}`}>
+                      <p className="text-3xl font-black">{value}</p>
+                      <p className="text-xs font-bold uppercase tracking-wider mt-1">{label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Findings Items */}
+                <div className="mt-6 divide-y divide-[#E8E2D5]">
+                  {visible.map((item) => (
+                    <div key={item.rule_id} className="py-4 flex items-start gap-3.5">
+                      {item.outcome === 'PASS' ? (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle
+                          className={`w-5 h-5 shrink-0 mt-0.5 ${
+                            item.outcome === 'FAIL' ? 'text-rose-600' : 'text-amber-600'
+                          }`}
+                        />
+                      )}
+                      <div>
+                        <p className="font-bold text-sm text-[#0B1224]">
+                          {item.requirement} —{' '}
+                          <span
+                            className={
+                              item.outcome === 'PASS'
+                                ? 'text-emerald-700'
+                                : item.outcome === 'FAIL'
+                                ? 'text-rose-700'
+                                : 'text-amber-700'
+                            }
+                          >
+                            {item.outcome === 'PASS'
+                              ? 'Passed'
+                              : item.outcome === 'FAIL'
+                              ? 'Potential Issue'
+                              : 'Review Required'}
+                          </span>
+                        </p>
+                        <p className="text-xs sm:text-sm text-[#475569] mt-1">{item.reason}</p>
+                        <p className="text-[11px] font-mono text-[#8C8275] mt-1">
+                          Legal reference: {item.rule_reference}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
+        )}
+      </div>
+    </AppShell>
+  );
 }
 
-function Section({ number, title, subtitle, children }) { return <section className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm"><div className="flex items-center gap-3 mb-5"><span className="w-9 h-9 rounded-full bg-slate-950 text-white grid place-items-center font-black shrink-0">{number}</span><div><h2 className="font-black text-lg">{title}</h2><p className="text-sm text-slate-500">{subtitle}</p></div></div>{children}</section>; }
-function Text({ label, value, onChange, placeholder, evidence }) { const confidence = evidence?.confidence; const uncertain = confidence != null && confidence < .8; return <label><span className="flex items-center text-xs font-bold uppercase text-slate-600">{label}{confidence != null && <span className={`ml-auto normal-case rounded-full px-2 py-0.5 ${uncertain ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>{uncertain ? 'Review' : 'AI extracted'} · {Math.round(confidence * 100)}%</span>}</span><input value={value || ''} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className={`mt-2 w-full rounded-xl border px-4 py-3 text-sm outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100 ${uncertain ? 'border-amber-300 bg-amber-50/30' : 'border-slate-300'}`} /></label>; }
-function Select({ label, value, onChange, options }) { return <label><span className="text-xs font-bold uppercase text-slate-600">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm bg-white">{options.map(([option,labelText]) => <option key={option} value={option}>{labelText}</option>)}</select></label>; }
+function Section({ number, title, subtitle, children }) {
+  return (
+    <section className="bg-white border border-[#E8E2D5] rounded-3xl p-6 sm:p-8 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
+      <div className="flex items-center gap-3.5 mb-6 pb-4 border-b border-[#E8E2D5]">
+        <span className="w-9 h-9 rounded-xl bg-[#0B1224] text-sky-400 grid place-items-center font-mono font-bold text-sm shrink-0 shadow-xs">
+          {number}
+        </span>
+        <div>
+          <h2 className="font-extrabold text-lg text-[#0B1224] tracking-tight">{title}</h2>
+          <p className="text-xs sm:text-sm text-[#8C8275] mt-0.5">{subtitle}</p>
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Text({ label, value, onChange, placeholder, evidence }) {
+  const confidence = evidence?.confidence;
+  const uncertain = confidence != null && confidence < 0.8;
+  return (
+    <label className="block">
+      <span className="flex items-center justify-between text-[11px] font-mono font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+        <span>{label}</span>
+        {confidence != null && (
+          <span
+            className={`normal-case font-mono rounded-full px-2 py-0.5 text-[10px] font-bold border ${
+              uncertain
+                ? 'bg-amber-50 text-amber-800 border-amber-200/60'
+                : 'bg-emerald-50 text-emerald-800 border-emerald-200/60'
+            }`}
+          >
+            {uncertain ? 'Needs Review' : 'AI mapped'} · {Math.round(confidence * 100)}%
+          </span>
+        )}
+      </span>
+      <input
+        value={value || ''}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className={`w-full rounded-xl border px-4 py-3 text-xs sm:text-sm outline-none transition-all ${
+          uncertain
+            ? 'border-amber-300 bg-amber-50/20 text-slate-900 focus:border-amber-400 focus:ring-2 focus:ring-amber-200/30'
+            : 'border-[#E8E2D5] bg-[#FAF8F5] text-slate-900 focus:bg-white focus:border-[#0284C7] focus:ring-2 focus:ring-[#0284C7]/15'
+        }`}
+      />
+    </label>
+  );
+}
+
+function Select({ label, value, onChange, options }) {
+  return (
+    <label className="block">
+      <span className="block text-[11px] font-mono font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded-xl border border-[#E8E2D5] bg-[#FAF8F5] focus:bg-white focus:border-[#0284C7] focus:ring-2 focus:ring-[#0284C7]/15 px-4 py-3 text-xs sm:text-sm text-slate-900 outline-none transition-all"
+      >
+        {options.map(([option, labelText]) => (
+          <option key={option} value={option}>
+            {labelText}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+

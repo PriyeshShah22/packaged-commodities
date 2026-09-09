@@ -35,7 +35,7 @@ export default function AppShell({ children, title, eyebrow, actions }) {
 
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 lg:flex antialiased font-sans">
+    <div className="min-h-screen bg-[#FAF8F5] text-slate-900 lg:flex antialiased font-sans">
       {/* Mobile Backdrop Overlay */}
       {mobileOpen && (
         <div

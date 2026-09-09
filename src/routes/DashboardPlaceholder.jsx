@@ -284,15 +284,12 @@ export default function DashboardPlaceholder() {
   const metrics = computeDashboard(reports);
   const [online, setOnline] = useState(null);
   const [animatedBars, setAnimatedBars] = useState(false);
-  const [showSweep, setShowSweep] = useState(true);
 
   useEffect(() => {
     getBackendHealth().then(setOnline);
     const timer1 = setTimeout(() => setAnimatedBars(true), 120);
-    const timer2 = setTimeout(() => setShowSweep(false), 1450);
     return () => {
       clearTimeout(timer1);
-      clearTimeout(timer2);
     };
   }, []);
 
@@ -332,12 +329,6 @@ export default function DashboardPlaceholder() {
 
   return (
     <AppShell title="Compliance Dashboard" eyebrow="OVERVIEW" actions={actionButton}>
-      {/* One-Time Horizontal Inspection Scan Sweep across Content on Load (1.35s) */}
-      {showSweep && (
-        <div className="pointer-events-none fixed inset-0 overflow-hidden z-50">
-          <div className="w-[3px] h-full bg-gradient-to-b from-transparent via-cyan-400 to-transparent shadow-[0_0_20px_#00f0ff] animate-dashboard-sweep" />
-        </div>
-      )}
 
       {/* 1. Page Header & Greeting Banner (Editorial & Warm with 100ms/200ms/300ms Stagger) */}
       <section className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-6 border-b border-[#E8E2D5] mb-6">

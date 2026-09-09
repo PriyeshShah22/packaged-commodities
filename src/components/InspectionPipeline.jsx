@@ -1,16 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Camera, Check, FileCheck, FileSearch, ShieldCheck } from 'lucide-react';
 
 export default function InspectionPipeline() {
   const [activeStep, setActiveStep] = useState(0);
 
-  // 5-second automatic inspection workflow demonstration cycle (1.25s per node)
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setActiveStep((prev) => (prev + 1) % 4);
-    }, 1250);
-    return () => clearInterval(timer);
-  }, []);
+  // Calm initial state - user can click nodes to explore workflow stages
+
 
   const steps = [
     {
