@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 from time import perf_counter
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -42,9 +43,12 @@ def import_listing(file: UploadFile = File(...), _: User = Depends(require_roles
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
-MAX_OCR_WORKERS = 2
+MAX_OCR_WORKERS = 1
 OCR_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS, thread_name_prefix="packmetrix-ocr")
-LIVE_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="packmetrix-live-ocr")
+# Share the warmed thread-local models. Separate live/full executors duplicated
+# ONNX sessions and caused severe memory pressure on the 8 GB inspector laptop.
+LIVE_OCR_EXECUTOR = OCR_EXECUTOR
+LIVE_REQUEST_LOCK = Lock()
 
 
 def warm_ocr_workers() -> None:
@@ -224,6 +228,7 @@ def barcode_product_lookup(code: str, _: User = Depends(require_roles("inspector
 def extract_image_declarations(
     files: list[UploadFile] = File(...),
     live: bool = Query(False),
+    text_only: bool = Query(False),
     _: User = Depends(require_roles("inspector", "admin")),
 ):
     request_started = perf_counter()
@@ -240,21 +245,29 @@ def extract_image_declarations(
         uploads.append((index, uploaded.filename, content))
 
     def process(item):
+        queue_wait_ms = round((perf_counter() - request_started) * 1000, 1)
         index, filename, content = item
         image_id = f"IMG-{index + 1:03d}"
         try:
             lines, quality = run_ocr(content, image_id, live=live)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=f"{filename}: {error}") from error
-        lines = [*lines, *_qr_lines(content, image_id)]
+        quality['queue_wait_ms'] = queue_wait_ms
+        if not live and not text_only:
+            lines = [*lines, *_qr_lines(content, image_id)]
         return {"image_id": image_id, "file_name": filename, "quality": quality, "line_count": len(lines), "lines": lines}
 
-    # Keep concurrency bounded while allowing front/back/side panels to overlap.
-    # Reuse bounded worker threads so their thread-local ONNX engines stay warm
+    # Bound model memory and reuse the worker so its ONNX engine stays warm
     # across Live OCR requests. Creating a pool here used to reload all models
     # for each accepted camera frame.
     executor = LIVE_OCR_EXECUTOR if live else OCR_EXECUTOR
-    image_results = list(executor.map(process, uploads))
+    if live and not LIVE_REQUEST_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail='The previous live frame is still being read. Retained text is unchanged; scanning will retry.')
+    try:
+        image_results = list(executor.map(process, uploads))
+    finally:
+        if live:
+            LIVE_REQUEST_LOCK.release()
     all_lines = [line for image in image_results for line in image["lines"]]
     extraction_started = perf_counter()
     fields = extract_declarations(all_lines)

@@ -53,7 +53,8 @@ export async function extractImages(files, token, { live = false, precision = fa
   let response;
   try {
     if (live) console.debug('[Live OCR] request sent');
-    response = await fetch(`${API_URL}/api/v1/ocr/extract${live ? '?live=true' : ''}`, { method: 'POST', headers: authHeaders(token), body: formData, signal: controller.signal });
+    const query = live ? '?live=true&text_only=true' : precision ? '?text_only=true' : '';
+    response = await fetch(`${API_URL}/api/v1/ocr/extract${query}`, { method: 'POST', headers: authHeaders(token), body: formData, signal: controller.signal });
     const result = await readResponse(response, 'OCR extraction failed for the uploaded images.');
     if (live) console.debug('[Live OCR] response received', { elapsedMs: Math.round(performance.now() - started), server: result.timing });
     return result;
