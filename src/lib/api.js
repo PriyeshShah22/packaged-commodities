@@ -1,5 +1,11 @@
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
+export async function importProductListing(file, token) {
+  const body = new FormData(); body.append('file', file);
+  const response = await fetch(`${API_URL}/api/v1/listing/import`, { method: 'POST', headers: authHeaders(token), body });
+  return readResponse(response, 'Inventory import failed.');
+}
+
 function authHeaders(token, json = false) {
   return { ...(json ? { 'Content-Type': 'application/json' } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
@@ -38,11 +44,11 @@ export async function getBackendHealth() {
   try { return (await fetch(`${API_URL}/health`)).ok; } catch { return false; }
 }
 
-export async function extractImages(files, token, { live = false } = {}) {
+export async function extractImages(files, token, { live = false, precision = false } = {}) {
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
   const controller = new AbortController();
-  const timeout = live ? setTimeout(() => controller.abort(), 20000) : null;
+  const timeout = live || precision ? setTimeout(() => controller.abort(), live ? 20000 : 60000) : null;
   const started = performance.now();
   let response;
   try {
@@ -52,7 +58,7 @@ export async function extractImages(files, token, { live = false } = {}) {
     if (live) console.debug('[Live OCR] response received', { elapsedMs: Math.round(performance.now() - started), server: result.timing });
     return result;
   } catch (error) {
-    if (error?.name === 'AbortError') throw new Error('Live OCR timed out. Keep the declaration panel in the guide and try the next clear frame.');
+    if (error?.name === 'AbortError') throw new Error(live ? 'Live OCR timed out. Keep the declaration panel in the guide and try the next clear frame.' : 'OCR timed out. Retained values are unchanged; try a clearer image.');
     throw error instanceof TypeError ? new Error('The OCR service is not reachable. Confirm that the backend on port 8000 is running.') : error;
   } finally {
     if (timeout) clearTimeout(timeout);

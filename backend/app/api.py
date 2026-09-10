@@ -25,9 +25,20 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.dependencies import current_user, require_roles
 from app.models import Role, User
 from app.schemas import InspectionContext, LoginRequest, SignupRequest, ValidationRequest
+from app.listing import parse_inventory
 
 
 router = APIRouter()
+
+
+@router.post('/listing/import')
+def import_listing(file: UploadFile = File(...), _: User = Depends(require_roles('inspector', 'admin'))):
+    if not (file.filename or '').lower().endswith('.csv'):
+        raise HTTPException(status_code=400, detail='Upload a CSV file. In Excel, choose Save As → CSV UTF-8.')
+    try:
+        return parse_inventory(file.file.read(2 * 1024 * 1024 + 1))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 15 * 1024 * 1024

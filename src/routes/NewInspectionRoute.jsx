@@ -1,12 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import { AlertCircle, Camera, CheckCircle2, ChevronDown, Download, FileImage, Loader2, Plus, ScanLine, Upload, X } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import LiveCameraScanner from '../components/inspection/LiveCameraScanner';
 import BulkInspectionPanel from '../components/inspection/BulkInspectionPanel';
+import ProductListingPanel from '../components/inspection/ProductListingPanel';
 import { useAuth } from '../context/auth-context';
 import { downloadReportPdf, evaluateInspection, extractImages, lookupBarcode } from '../lib/api';
 import { saveReport } from '../lib/reportStore';
+import { hasReadableText, reliableLiveFields } from '../lib/liveOcr';
 
 const EMPTY = { brand_name: '', responsible_party_name: '', responsible_party_address: '', commodity_name: '', net_quantity: '', mrp: '', consumer_care: '', consumer_phone: '', consumer_email: '', country_of_origin: '', manufacture_pack_import_date: '', best_before_or_use_by: '', unit_sale_price: '', fssai_license: '', batch_number: '', barcode: '', qr_code: '', ingredients: '', nutrition_information: '' };
 const LABELS = { brand_name: 'Brand name', responsible_party_name: 'Manufacturer / packer / importer', responsible_party_address: 'Responsible party address', commodity_name: 'Common / generic commodity name', net_quantity: 'Net quantity', mrp: 'Maximum retail price', consumer_phone: 'Consumer-care mobile number', consumer_email: 'Consumer-care email', fssai_license: 'FSSAI licence number', batch_number: 'Batch / lot number', barcode: 'Barcode / GTIN', qr_code: 'QR code content', country_of_origin: 'Country of origin', manufacture_pack_import_date: 'Manufacture / pack / import date', best_before_or_use_by: 'Best before / use by', unit_sale_price: 'Unit sale price', ingredients: 'Ingredients', nutrition_information: 'Nutrition information' };
@@ -86,7 +88,9 @@ function conditionsFromDetectedFields(conditions, fields) {
 
 export default function NewInspectionRoute() {
   const { token, user } = useAuth(); const navigate = useNavigate();
-  const [inspectionMode, setInspectionMode] = useState(() => new URLSearchParams(window.location.search).get('mode') === 'bulk' ? 'bulk' : 'grouped');
+  const [modeParams, setModeParams] = useSearchParams();
+  const inspectionMode = ['bulk', 'listing'].includes(modeParams.get('mode')) ? modeParams.get('mode') : 'grouped';
+  const setInspectionMode = (mode) => setModeParams({ mode });
   const [products, setProducts] = useState(() => [newProduct(1)]); const [activeKey, setActiveKey] = useState(() => products[0].key); const [bulkDownloading, setBulkDownloading] = useState(false);
   const active = products.find((product) => product.key === activeKey) || products[0];
   const update = (key, patch) => setProducts((current) => current.map((product) => product.key === key ? { ...product, ...(typeof patch === 'function' ? patch(product) : patch) } : product));
@@ -97,10 +101,14 @@ export default function NewInspectionRoute() {
     if (!files.length) return false;
     if (!background) update(key, { ocrLoading: true, ocrError: '' });
     try {
-      const data = await extractImages(files, token, { live }); const tooBlurry = data.images?.some((image) => image.quality?.blur_status === 'high');
+      const response = await extractImages(files, token, { live, precision: background });
+      if (!hasReadableText(response)) {
+        if (!background) update(key, { ocrError: 'No readable text in this frame. Move closer or reduce glare and try again.' });
+        return false;
+      }
+      const data = live || background ? { ...response, fields: reliableLiveFields(response) } : response;
       update(key, (product) => {
         const ocrData = append ? mergedOcr(product.ocrData, data) : data;
-        if (tooBlurry) return { ocrData, ocrError: 'Frame too blurred to update fields. Hold the package steady, fill the guide, and scan again.' };
         const declarations = { ...product.declarations };
         Object.entries(ocrData.fields || {}).forEach(([field, evidence]) => {
           const previousDetectedValue = product.ocrData?.fields?.[field]?.value || '';
@@ -213,10 +221,10 @@ export default function NewInspectionRoute() {
                 Select Intake Mode
               </h2>
               <p className="text-xs text-[#8C8275] mt-0.5">
-                Single or grouped package inspection with multi-panel OCR, or batch bulk analysis
+                Single or grouped package OCR, bulk image analysis, or store inventory listing
               </p>
             </div>
-            <div className="inline-flex bg-[#F4EFE6] rounded-2xl p-1.5 border border-[#E8E2D5] self-start sm:self-auto shrink-0">
+            <div className="inline-flex flex-wrap bg-[#F4EFE6] rounded-2xl p-1.5 border border-[#E8E2D5] self-start sm:self-auto">
               <button
                 onClick={() => setInspectionMode('grouped')}
                 className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
@@ -237,11 +245,12 @@ export default function NewInspectionRoute() {
               >
                 Bulk Batch Processing
               </button>
+              <button onClick={() => setInspectionMode('listing')} className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold ${inspectionMode === 'listing' ? 'bg-[#0B1224] text-white shadow-sm' : 'text-[#475569]'}`}>Product Listing</button>
             </div>
           </div>
         </section>
 
-        {inspectionMode === 'bulk' ? (
+        {inspectionMode === 'listing' ? <ProductListingPanel token={token} user={user} /> : inspectionMode === 'bulk' ? (
           <BulkInspectionPanel token={token} user={user} />
         ) : (
           <>
@@ -469,6 +478,7 @@ export default function NewInspectionRoute() {
               ) : (
                 <div className="mt-4">
                   <LiveCameraScanner
+                    key={active.key}
                     onCapture={cameraCapture}
                     onCodeDetected={codeDetected}
                     ocrData={active.ocrData}

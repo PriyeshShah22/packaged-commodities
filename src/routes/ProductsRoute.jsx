@@ -209,7 +209,7 @@ export default function ProductsRoute() {
             latest.declarations?.responsible_party_name ||
             'Manufacturer / Packer Not Disclosed';
           const netQty = latest.declarations?.net_quantity;
-          const mrp = latest.declarations?.mrp;
+          const mrp = latest.captureMode === 'listing' ? latest.declarations?.mrp?.replace(/^MRP\s*/i, '') : latest.declarations?.mrp;
           const score = latest.verificationScore ?? latest.score ?? 0;
 
           // Status Visual Style
@@ -292,7 +292,7 @@ export default function ProductsRoute() {
                   {/* Score & Progress */}
                   <div className="text-right hidden sm:block">
                     <div className="flex items-center gap-2 justify-end">
-                      <span className="text-xs text-[#8C8275] font-medium">Compliance:</span>
+                      <span className="text-xs text-[#8C8275] font-medium">{latest.captureMode === 'listing' ? 'Verification:' : 'Compliance:'}</span>
                       <span className="font-mono font-bold text-sm text-[#0B1224]">{score}%</span>
                     </div>
                     <div className="w-24 h-1.5 rounded-full bg-[#F4EFE6] overflow-hidden mt-1 ml-auto">

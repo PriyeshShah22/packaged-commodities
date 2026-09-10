@@ -22,7 +22,17 @@ function withScore(report) {
 }
 
 export function getReports() {
-  try { return JSON.parse(localStorage.getItem(KEY) || '[]').map(withScore); } catch { return []; }
+  try {
+    const reports = JSON.parse(localStorage.getItem(KEY) || '[]');
+    const ids = new Set(reports.map((report) => report.id));
+    // Listing batches retain every row even when the recent-report cache fills.
+    for (const batch of getBulkBatches().filter((item) => item.mode === 'listing')) {
+      for (const group of batch.groups || []) {
+        if (group.report && !ids.has(group.report.id)) { reports.push(group.report); ids.add(group.report.id); }
+      }
+    }
+    return reports.map(withScore);
+  } catch { return []; }
 }
 
 export function saveReport(report) {
@@ -47,7 +57,10 @@ export function getReport(id) { return getReports().find((report) => report.id =
 export function updateReport(id, patch) {
   const current = getReport(id);
   if (!current) return null;
-  return saveReport({ ...current, ...(typeof patch === 'function' ? patch(current) : patch) });
+  const updated = saveReport({ ...current, ...(typeof patch === 'function' ? patch(current) : patch) });
+  const batch = getBulkBatch(updated.batchId);
+  if (batch?.mode === 'listing') saveBulkBatch({ ...batch, groups: batch.groups.map((group) => group.report?.id === id ? { ...group, report: updated } : group) });
+  return updated;
 }
 
 export function archiveReport(id) { return updateReport(id, { archived: true, archivedAt: new Date().toISOString() }); }

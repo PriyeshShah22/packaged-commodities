@@ -191,14 +191,14 @@ export default function ReportDetailRoute() {
           onClick={() =>
             navigate(
               bulkBatch && canReview
-                ? `/inspections/new?mode=bulk&batch=${encodeURIComponent(report.batchId)}`
+                ? `/inspections/new?mode=${bulkBatch.mode === 'listing' ? 'listing' : 'bulk'}&batch=${encodeURIComponent(report.batchId)}`
                 : '/reports'
             )
           }
           className="group inline-flex items-center gap-2 text-xs font-bold text-slate-600 hover:text-[#0284C7] transition-colors cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4 transition-transform group-hover:-translate-x-0.5" />
-          <span>{bulkBatch ? 'Back to Bulk Batch' : 'All Inspection Reports'}</span>
+          <span>{bulkBatch ? bulkBatch.mode === 'listing' ? 'Back to Product Listing' : 'Back to Bulk Batch' : 'All Inspection Reports'}</span>
         </button>
 
         <div className="flex items-center gap-2">
@@ -217,6 +217,7 @@ export default function ReportDetailRoute() {
           <span>{error}</span>
         </div>
       )}
+      {report.captureMode === 'listing' && <div className="mb-5 p-4 rounded-xl bg-sky-50 text-sm text-slate-700"><strong>Store inventory screening</strong><p>Source: {report.listingSource?.fileName}, row {report.listingSource?.rowNumber}. Supplied values require verification against the package before a final determination.</p><details className="mt-2"><summary>Original imported declarations</summary><dl>{Object.entries(report.listingSource?.raw || {}).map(([key, value]) => <div key={key}><dt className="font-bold inline">{key}: </dt><dd className="inline">{value || 'Not supplied'}</dd></div>)}</dl></details></div>}
 
       {/* =========================================================================
           TIER 1: ASSESSMENT HEADER (EXECUTIVE DARK NAVY FEATURE PANEL)
@@ -339,7 +340,7 @@ export default function ReportDetailRoute() {
               <p>• Standards of Weights and Measures (Packaged Commodities) Rules, 2011</p>
               <p>• Department of Consumer Affairs Regulatory Verification System</p>
               <p className="text-slate-500">
-                Mode: {report.captureMode === 'live' ? 'Live Real-Time OCR Scan' : 'High-Resolution Multi-Surface Capture'}
+                Mode: {report.captureMode === 'listing' ? 'Store Inventory Import' : report.captureMode === 'live' ? 'Live Real-Time OCR Scan' : 'High-Resolution Multi-Surface Capture'}
               </p>
             </div>
           </div>
@@ -364,7 +365,7 @@ export default function ReportDetailRoute() {
                   Product &amp; Declaration Details
                 </h2>
                 <p className="text-xs text-[#8C8275] mt-0.5">
-                  Core statutory disclosures extracted from submitted package surfaces
+                  {report.captureMode === 'listing' ? 'Declarations supplied in the store inventory list' : 'Core statutory disclosures extracted from submitted package surfaces'}
                 </p>
               </div>
             </div>
@@ -543,6 +544,7 @@ export default function ReportDetailRoute() {
         {/* =======================================================================
             TIER 3: SUBMITTED EVIDENCE (INSPECTION PHOTO VIEWER & LIGHTBOX)
             ======================================================================= */}
+        {report.captureMode !== 'listing' && <>
         <section className="bg-white border border-[#E8E2D5] rounded-3xl p-6 sm:p-8 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-[#E8E2D5]">
             <div className="flex items-center gap-2.5">
@@ -709,6 +711,7 @@ export default function ReportDetailRoute() {
         {/* =======================================================================
             TIER 5: OFFICER REVIEW & COMPLIANCE DECISIONS WORKFLOW
             ======================================================================= */}
+        </>}
         {canReview && <section className="bg-white border border-[#E8E2D5] rounded-3xl p-6 sm:p-8 shadow-[0_4px_24px_-4px_rgba(30,25,15,0.04)]">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-[#E8E2D5]">
             <div className="flex items-center gap-2.5">
@@ -1000,6 +1003,7 @@ function Finding({ item, onChange, tone }) {
 
 // AI Confidence Badge
 function ConfidenceBadge({ evidence }) {
+  if (evidence?.source_type === 'inventory_import') return <span className="text-[10px] font-mono text-slate-600">Store supplied{evidence.confidence < .75 ? ' · Verify format' : ''}</span>;
   if (!evidence) {
     return (
       <span className="inline-block text-[10px] font-mono text-[#8C8275] bg-[#FAF8F5] px-2 py-0.5 rounded border border-[#E8E2D5]">

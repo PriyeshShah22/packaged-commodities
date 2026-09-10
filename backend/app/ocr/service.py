@@ -110,8 +110,6 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
         raise ValueError("The uploaded file could not be decoded as an image.")
 
     source_image = image
-    source_gray = cv2.cvtColor(source_image, cv2.COLOR_BGR2GRAY)
-    source_blur_variance = float(cv2.Laplacian(source_gray, cv2.CV_64F).var())
     height, width = image.shape[:2]
     # Live capture is progressive: use a bounded, high-enough resolution for the
     # first response instead of making an inspector wait for every expensive
@@ -200,9 +198,10 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
             result = enhanced_result
             quality["enhanced_for_small_text"] = True
 
-    # On a clear live frame, inspect detected boxes for faint stamped rows even
-    # when primary OCR slightly damages the MRP/date label. The targeted helper
-    # returns immediately when the frame has no price-sticker structure.
+    # Return whole-frame text immediately in live mode. The camera schedules
+    # this same image through the existing comprehensive path in the background.
+    # Running the multi-offset stamp search here blocked the first response and
+    # then repeated that work again during precision refinement.
     stamped_started = perf_counter()
     dot_matrix_lines = (
         extract_dot_matrix_lines(
@@ -213,9 +212,10 @@ def run_ocr(image_bytes: bytes, image_id: str, *, live: bool = False) -> tuple[l
             coordinate_scale=coordinate_scale,
             comprehensive=not live,
         )
-        if not live or max(source_blur_variance, blur_variance) >= 100
+        if not live
         else []
     )
+    quality["precision_deferred"] = live
     quality["timing_ms"]["stamped_fields"] = round((perf_counter() - stamped_started) * 1000, 1)
 
     lines: list[dict[str, Any]] = []

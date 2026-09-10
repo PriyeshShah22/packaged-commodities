@@ -1,0 +1,21 @@
+import fs from 'node:fs/promises';
+import { Workbook } from '@oai/artifact-tool';
+const items=[['Wheat flour','1 kg',65],['Rice','5 kg',450],['Sugar','1 kg',55],['Salt','1 kg',28],['Tea','250 g',150],['Coffee','100 g',220],['Biscuits','200 g',40],['Noodles','70 g',15],['Ketchup','500 g',120],['Sunflower oil','1 L',160],['Chickpeas','500 g',75],['Lentils','1 kg',130],['Oats','500 g',110],['Peanut butter','340 g',180],['Mango drink','1 L',95],['Milk powder','500 g',240],['Ghee','500 mL',350],['Dates','500 g',369],['Breakfast cereal','250 g',140],['Chilli powder','100 g',45]];
+const headers=['Product Name','Brand','Category','Net Quantity','MRP','Mfg Date','Best Before','Manufacturer','Address','Common Name','Barcode','Batch Number','Consumer Phone','Consumer Email','Country of Origin','FSSAI','Unit Sale Price','Data Type','Test Scenario'];
+const rows=items.map(([name,qty,price],i)=>{
+ const n=String(i+1).padStart(2,'0');
+ const base='0200000000'+n;
+ const sum=[...base].reverse().reduce((s,d,j)=>s+Number(d)*(j%2?1:3),0);
+ const code=base+((10-sum%10)%10);
+ const [,amount,unit]=qty.match(/([\d.]+)\s*(\S+)/);
+ const mfg=i===17?'FEB-2026':i===18?'01/12/2026':'01/08/2026';
+ const expiry=i===17?'AUG-2026':i===19?'01/07/2026':'01/08/2027';
+ const mrp=i%4===0?`MRP ₹${price}.00`:i%4===1?`Rs. ${price}.00`:i%4===2?`MRP ${price}/-`:`₹ ${price}`;
+ return [`TEST ONLY - ${name}`, 'TEST ONLY - Sample Brand','food',qty,mrp,mfg,expiry,'TEST ONLY - Fictional Foods Pvt Ltd','TEST ONLY - 1 Example Road, Sample Town, Maharashtra 400001',name,code,`TEST-2026-${n}`,'+910000000000',`product${n}@example.invalid`,'India','00000000000000',`₹${(price/Number(amount)).toFixed(2)} per ${unit}`,'SYNTHETIC TEST DATA - NOT REAL INVENTORY; barcode and FSSAI are mock identifiers, not registrations',i===17?'Past best-before month: verify':i===18?'Future manufacture date: verify':i===19?'Best-before before manufacture: verify':'Filled declarations and price-format normalization; no predetermined legal outcome'];
+});
+if(rows.length!==20||rows.some(r=>r.length!==headers.length||r.some(v=>!String(v).trim())))throw Error('Incomplete test data');
+const w=Workbook.create();const s=w.worksheets.add('Test Inventory');s.getRange('A1:S21').values=[headers,...rows];w.recalculate();
+console.log((await w.inspect({kind:'region',sheetId:s.name,range:'A1:G4',maxChars:1800})).ndjson);
+const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"';
+await fs.writeFile(new URL('./PackMetrix-20-FULLY-FILLED-TEST-ONLY.csv',import.meta.url),'\uFEFF'+s.getRange('A1:S21').values.map(r=>r.map(quote).join(',')).join('\r\n')+'\r\n');
+console.log('20 fully populated, explicitly synthetic rows exported.');

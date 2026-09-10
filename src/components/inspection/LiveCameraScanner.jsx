@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { withDeadline } from '../../lib/liveOcr';
 import {
   Camera,
   CameraOff,
@@ -20,6 +21,9 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
   const acceptedFramesRef = useRef([]);
   const captureInFlightRef = useRef(false);
   const candidateSinceRef = useRef(0);
+  const precisionInFlightRef = useRef(false);
+  const precisionQueueRef = useRef([]);
+  const sessionRef = useRef(0);
 
   const [active, setActive] = useState(false);
   const [continuous, setContinuous] = useState(false);
@@ -27,6 +31,8 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
   const [captureStatus, setCaptureStatus] = useState('');
 
   const stop = () => {
+    sessionRef.current += 1;
+    precisionQueueRef.current = [];
     clearInterval(intervalRef.current);
     intervalRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -71,6 +77,9 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
       }
 
       streamRef.current = stream;
+      previousSampleRef.current = null;
+      acceptedFramesRef.current = [];
+      detectedCodesRef.current.clear();
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
@@ -85,6 +94,9 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
     // Live mode samples one temporary frame at a time. It never builds a photo
     // queue, so repeated copies of the same package are not shown or stored.
     if (!videoRef.current?.videoWidth || busyRef.current || captureInFlightRef.current) return;
+    // Backpressure preserves refinement for every accepted side, not an
+    // unbounded queue or silently discarded precision work.
+    if (automatic && precisionQueueRef.current.length >= 12) return;
     const video = videoRef.current;
     let acceptedCandidate = null;
 
@@ -150,10 +162,10 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
     // Only render/encode the high-resolution crop after the cheap sample has
     // passed. Previously this work ran on every rejected sample.
     const canvas = canvasRef.current;
-    const source = automatic
-      ? { x: video.videoWidth * .12, y: video.videoHeight * .10, width: video.videoWidth * .76, height: video.videoHeight * .80 }
-      : { x: 0, y: 0, width: video.videoWidth, height: video.videoHeight };
-    // Automatic frames prioritize a fast OCR response. 1280px remains large
+    // The guide is a stability hint, not an OCR crop. Declarations near package
+    // edges must not disappear merely because they sit outside its rectangle.
+    const source = { x: 0, y: 0, width: video.videoWidth, height: video.videoHeight };
+    // Automatic frames prioritize a fast OCR response. 1600px remains large
     // enough for the stamped MRP/date pass while reducing pixels sent through
     // the detector. Manual evidence capture keeps the higher-quality path.
     const maxDimension = automatic ? 1600 : 1800;
@@ -163,11 +175,28 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
     const context = canvas.getContext('2d');
     context.drawImage(video, source.x, source.y, source.width, source.height, 0, 0, canvas.width, canvas.height);
 
+    // Lock before ANY asynchronous work and bind callbacks to this product.
+    captureInFlightRef.current = true;
+    const session = sessionRef.current;
+    const captureHandler = onCaptureRef.current;
+    const codeHandler = onCodeDetectedRef.current;
+    setError('');
+    try {
+    const blob = await withDeadline(() => new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9)), 3000, 'Camera encoding timed out. Try another frame.');
+    if (!blob) throw new Error('Could not capture this frame. Try again.');
+    if (session !== sessionRef.current) return;
+    const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
+    console.debug('[Live OCR] image captured', { bytes: blob.size, width: canvas.width, height: canvas.height });
+    setCaptureStatus(automatic ? 'Reading this live frame…' : 'Reading captured evidence…');
+    // Send OCR first. A slow/offline barcode catalogue must never gate text OCR.
+    const reading = captureHandler(file, automatic, false);
+
     // Chromium exposes its native barcode/QR detector to the browser. It is
     // independent of OCR and therefore recovers codes even when nearby print
     // is tiny, stylised, or dot-matrix. Unsupported browsers simply continue
     // with the normal OCR path.
-    if ('BarcodeDetector' in window && onCodeDetectedRef.current) {
+    if ('BarcodeDetector' in window && codeHandler) {
+      void withDeadline(async () => {
       try {
         const requestedFormats = ['qr_code', 'ean_8', 'ean_13', 'upc_a', 'upc_e', 'code_128', 'itf'];
         const supportedFormats = window.BarcodeDetector.getSupportedFormats ? await window.BarcodeDetector.getSupportedFormats() : requestedFormats;
@@ -175,25 +204,21 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
         if (!formats.length) throw new Error('No supported barcode formats');
         const detector = new window.BarcodeDetector({ formats });
         const codes = await detector.detect(canvas);
+        if (session !== sessionRef.current) return;
         for (const code of codes) {
           const rawValue = String(code.rawValue || '').trim();
           const key = `${code.format}:${rawValue}`;
           if (rawValue && !detectedCodesRef.current.has(key)) {
             detectedCodesRef.current.add(key);
-            await onCodeDetectedRef.current({ value: rawValue, format: code.format });
+            void Promise.resolve(codeHandler({ value: rawValue, format: code.format })).catch(() => {});
           }
         }
       } catch { /* Barcode detection is an enhancement; OCR remains available. */ }
+      }, 2000, 'Barcode detection timed out').catch(() => {});
     }
 
-    captureInFlightRef.current = true;
-    try {
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
-      if (blob) {
-        console.debug('[Live OCR] image captured', { bytes: blob.size, width: canvas.width, height: canvas.height });
-        const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
-        setCaptureStatus(automatic ? 'Reading this live frame…' : 'Reading captured evidence…');
-        const succeeded = await onCaptureRef.current(file, automatic, false);
+        const succeeded = await reading;
+        if (session !== sessionRef.current) return;
         if (automatic && succeeded !== false && acceptedCandidate) {
           acceptedFramesRef.current = [
             ...acceptedFramesRef.current.filter((accepted) => {
@@ -204,13 +229,32 @@ export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, 
           ].slice(-6);
         }
         if (automatic && succeeded !== false) {
+          precisionQueueRef.current.push({ file, captureHandler, session });
           setCaptureStatus('Quick read retained — refining small and dotted text…');
-          void onCaptureRef.current(file, true, true).then((refined) => {
-            setCaptureStatus(refined === false ? 'Quick read retained — use Capture Evidence for a clearer precision read.' : 'Precision read retained — show another side when ready.');
-          });
+          if (!precisionInFlightRef.current) {
+            precisionInFlightRef.current = true;
+            void (async () => {
+              try {
+                while (precisionQueueRef.current.length) {
+                  const queued = precisionQueueRef.current.shift();
+                  if (queued.session !== sessionRef.current) continue;
+                  try {
+                    const refined = await queued.captureHandler(queued.file, true, true);
+                    if (queued.session === sessionRef.current) setCaptureStatus(refined === false ? 'Quick read retained — use Capture Evidence for a clearer precision read.' : 'Precision read retained — show another side when ready.');
+                  } catch {
+                    if (queued.session === sessionRef.current) setCaptureStatus('Quick read retained — precision read failed; scanning can continue.');
+                  }
+                }
+              } finally { precisionInFlightRef.current = false; }
+            })();
+          }
         } else {
           setCaptureStatus(succeeded === false ? 'No reliable text in that frame — keep scanning.' : 'Live text retained — show another side when ready.');
         }
+    } catch (failure) {
+      if (session === sessionRef.current) {
+        setError(failure.message || 'This frame could not be read. Try again.');
+        setCaptureStatus('Frame not read — ready to try another frame.');
       }
     } finally {
       captureInFlightRef.current = false;

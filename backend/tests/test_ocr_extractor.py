@@ -20,6 +20,20 @@ def line(text, confidence=0.95, image_id="IMG-001", y=0):
     return {"text": text, "confidence": confidence, "image_id": image_id, "bbox": [10, y, 400, y + 20]}
 
 
+def test_live_clear_frame_returns_all_primary_text_before_precision(monkeypatch):
+    image = np.zeros((620, 820, 3), dtype=np.uint8)
+    image[::2] = 255  # High Laplacian detail used to force slow stamp searches.
+    _, encoded = cv2.imencode('.png', image)
+    result = SimpleNamespace(boxes=np.array([[[10, 10], [300, 10], [300, 40], [10, 40]]]), txts=['Readable text without a declaration label'], scores=[.96])
+    monkeypatch.setattr(service, 'get_ocr_engine', lambda: lambda *args, **kwargs: result)
+    monkeypatch.setattr(service, 'extract_dot_matrix_lines', lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('precision blocks first live response')))
+    service._ocr_cache.clear()
+    lines, quality = service.run_ocr(encoded.tobytes(), 'LIVE-TEST', live=True)
+    assert lines[0]['text'] == result.txts[0]
+    assert quality['precision_deferred'] is True
+    assert quality['dot_matrix_fields_detected'] == 0
+
+
 def test_live_ocr_uses_fast_primary_pass_and_keeps_full_cache_separate(monkeypatch):
     image = np.full((620, 820, 3), 180, dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", image)

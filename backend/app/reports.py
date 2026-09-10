@@ -220,6 +220,8 @@ def _summary(report, styles):
     verification = report.get("verification") or {}
     total = int(verification.get("total", sum(int(counts.get(key, 0)) for key in ("PASS", "FAIL", "REVIEW"))))
     verified = int(verification.get("verified", int(counts.get("PASS", 0)) + int(counts.get("FAIL", 0))))
+    if report.get('captureMode') == 'listing':
+        score = int(100 * verified / total + .5) if total else 0
     status_str = _status(report)
 
     if status_str in ("PASS", "COMPLIANT"):
@@ -244,7 +246,7 @@ def _summary(report, styles):
         Paragraph(f"<font color='{status_text.hexval()}'><b>{badge_label}</b></font>", styles["PMStatus"]),
         Spacer(1, 1 * mm),
         Paragraph(
-            "Evaluation based on photographic package evidence under Legal Metrology Rules.",
+            "Screening of store-supplied inventory; physical package verification is pending." if report.get('captureMode') == 'listing' else "Evaluation based on photographic package evidence under Legal Metrology Rules.",
             styles["PMSmall"]
         ),
     ]
@@ -254,7 +256,7 @@ def _summary(report, styles):
         Spacer(1, 1.5 * mm),
         Paragraph(f"<b>{verified}/{total} checks verified</b>", styles["PMValueBold"]),
         Spacer(1, 1 * mm),
-        Paragraph(f"Compliance Index: <b>{score}%</b>", styles["PMBody"]),
+        Paragraph(f"{'Verification completeness' if report.get('captureMode') == 'listing' else 'Compliance Index'}: <b>{score}%</b>", styles["PMBody"]),
         Paragraph("Automated deterministic validation", styles["PMSmall"]),
     ]
 
@@ -528,9 +530,9 @@ def _officer_determination(report, styles):
         ("Report status", _status(report)),
         ("Final officer determination", report.get("finalDecision") or "Pending officer review"),
         ("Officer remarks", report.get("officerRemarks") or "No final officer remark recorded"),
-        ("Reviewed by", reviewer.get("name") or report.get("inspectorName") or "Pending"),
-        ("Final review timestamp", report.get("reviewedAt") or report.get("date") or "Pending"),
-        ("Evidence references", f"{int(report.get('imageCount') or 0)} submitted package surface image(s)"),
+        ("Reviewed by", reviewer.get("name") or ("Pending" if report.get('captureMode') == 'listing' else report.get("inspectorName") or "Pending")),
+        ("Final review timestamp", report.get("reviewedAt") or ("Pending" if report.get('captureMode') == 'listing' else report.get("date") or "Pending")),
+        ("Evidence references", f"{(report.get('listingSource') or {}).get('fileName', '')}, CSV row {(report.get('listingSource') or {}).get('rowNumber', '')}" if report.get('captureMode') == 'listing' else f"{int(report.get('imageCount') or 0)} submitted package surface image(s)"),
     ]
     table = Table(
         [[Paragraph(f"<b>{_safe(k)}</b>", styles["PMLabel"]), Paragraph(_safe(v), styles["PMBody"])] for k, v in decisions],
@@ -584,6 +586,9 @@ def _story(report, styles, title=True):
             Paragraph("Ministry of Consumer Affairs, Food & Public Distribution | Department of Legal Metrology", styles["PMSubtitle"]),
         ]
     result.append(_header_metadata(report, styles))
+    if report.get('captureMode') == 'listing':
+        source = report.get('listingSource') or {}
+        result.append(Paragraph(f"Store inventory screening | Source: {_safe(source.get('fileName'))}, row {_safe(source.get('rowNumber'))}. Supplied values have not been verified against physical packaging. Missing inventory data requires review, not an automatic finding of absence.", styles['PMSmall']))
     result.append(Spacer(1, 3 * mm))
 
     # 2. Review Required / Assessment Summary (Visual focus near top)
@@ -620,13 +625,13 @@ def _story(report, styles, title=True):
     result.append(PageBreak())
 
     # PAGE 3 — COMPOSITION, TRANSCRIPTS & DETERMINATION
-    result.append(Paragraph("Ingredients and nutrition", styles["PMSection"]))
-    result.append(_composition(report, styles))
-    result.append(Spacer(1, 3.5 * mm))
-
-    result.append(Paragraph("Complete extracted text", styles["PMSection"]))
-    result.extend(_transcript(report, styles))
-    result.append(Spacer(1, 3.5 * mm))
+    if report.get('captureMode') != 'listing':
+        result.append(Paragraph("Ingredients and nutrition", styles["PMSection"]))
+        result.append(_composition(report, styles))
+        result.append(Spacer(1, 3.5 * mm))
+        result.append(Paragraph("Complete extracted text", styles["PMSection"]))
+        result.extend(_transcript(report, styles))
+        result.append(Spacer(1, 3.5 * mm))
 
     result.append(Paragraph("Officer determination", styles["PMSection"]))
     result.extend(_officer_determination(report, styles))
@@ -669,7 +674,7 @@ def build_bulk_report_pdf(batch: dict[str, Any]) -> bytes:
     review = sum(r.get("status") == "REVIEW" for r in reports)
 
     story = [
-        Paragraph("BULK INSPECTION SUMMARY", styles["PMKicker"]),
+        Paragraph("PRODUCT LISTING SUMMARY" if batch.get('mode') == 'listing' else "BULK INSPECTION SUMMARY", styles["PMKicker"]),
         Paragraph("Multi-Product Compliance Inspection Report", styles["PMTitle"]),
         Paragraph("Ministry of Consumer Affairs, Food & Public Distribution | Department of Legal Metrology", styles["PMSubtitle"]),
         Table(
@@ -731,12 +736,12 @@ def build_bulk_report_pdf(batch: dict[str, Any]) -> bytes:
         return (findings[0].get("requirement") if findings else "No issue detected") or "No issue detected"
 
     ordered = sorted(reports, key=lambda r: {"NON_COMPLIANT": 0, "REVIEW": 1, "COMPLIANT": 2}.get(r.get("status"), 3))
-    header_cols = ["Product / Identifier", "Panels", "Assessment", "Primary Finding", "Report Dossier ID"]
+    header_cols = ["Product / Identifier", "CSV row" if batch.get('mode') == 'listing' else "Panels", "Assessment", "Primary Finding", "Report Dossier ID"]
     rows = [[Paragraph(f"<b>{c}</b>", styles["PMTableHead"]) for c in header_cols]]
     for r in ordered:
         p_name = (r.get("details") or {}).get("productName") or "Unidentified product"
         barcode = (r.get("declarations") or {}).get("barcode") or (r.get("details") or {}).get("productId") or "GTIN not detected"
-        img_count = str(r.get("imageCount") or 0)
+        img_count = str((r.get('listingSource') or {}).get('rowNumber', '') if batch.get('mode') == 'listing' else r.get("imageCount") or 0)
         st = _safe(_status(r))
         mf = _safe(main_finding(r))
         rid = _safe(r.get("id"))
@@ -763,11 +768,11 @@ def build_bulk_report_pdf(batch: dict[str, Any]) -> bytes:
         summary_table,
         Spacer(1, 5 * mm),
         Paragraph(
-            "Each report ID references a separate product inspection record. The complete retained OCR transcript for every product follows for audit and comparison.",
+            "Store-supplied inventory screening, not physical package verification. Missing data requires officer review. Each report ID references the separately saved product report." if batch.get('mode') == 'listing' else "Each report ID references a separate product inspection record. The complete retained OCR transcript for every product follows for audit and comparison.",
             styles["PMSmall"]
         )
     ]
-    for report in ordered:
+    for report in ([] if batch.get('mode') == 'listing' else ordered):
         product_name = (report.get("details") or {}).get("productName") or "Unidentified product"
         story += [
             PageBreak(),
