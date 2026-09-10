@@ -1,16 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hasReadableText, reliableLiveFields, withDeadline, encodeCameraFrame } from './liveOcr.js';
-
-test('selected frame encoding does not wait for an idle toBlob callback', async () => {
-  const canvas = { toBlob() { throw new Error('idle encoder must not run'); }, toDataURL(type, quality) { assert.equal(type, 'image/jpeg'); assert.equal(quality, .9); return 'data:image/jpeg;base64,/9j/2Q=='; } };
-  const blob = encodeCameraFrame(canvas);
-  assert.equal(blob.type, 'image/jpeg');
-  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [255, 216, 255, 217]);
-});
-test('an unready camera frame fails explicitly instead of sending empty data', () => {
-  assert.throws(() => encodeCameraFrame({ toDataURL: () => 'data:,' }), /not ready/);
-});
+import { hasReadableText, reliableLiveFields, withDeadline } from './liveOcr.js';
 
 test('empty OCR is not success; readable text requires no predefined field', () => {
   assert.equal(hasReadableText({ images: [{ lines: [] }], fields: {} }), false);

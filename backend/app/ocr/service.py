@@ -11,9 +11,6 @@ from rapidocr import RapidOCR
 
 from app.ocr.dot_matrix import extract_dot_matrix_lines
 
-# Leave CPU capacity for video capture and the browser on two-core laptops.
-cv2.setNumThreads(1)
-
 
 _engine_state = local()
 _ocr_cache: OrderedDict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = OrderedDict()
@@ -30,9 +27,7 @@ def get_ocr_engine() -> RapidOCR:
             "Global.max_side_len": 2400,
             # Let ONNX reuse its CPU arena and avoid oversubscribing every one
             # of the host's logical cores for small recognition crops.
-            # Six threads per session previously starved video/encoding on
-            # this inspector workstation.
-            "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+            "EngineConfig.onnxruntime.intra_op_num_threads": 6,
             "EngineConfig.onnxruntime.inter_op_num_threads": 1,
             "EngineConfig.onnxruntime.enable_cpu_mem_arena": True,
         })

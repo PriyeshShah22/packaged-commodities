@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { encodeCameraFrame } from '../../lib/liveOcr';
+import { withDeadline } from '../../lib/liveOcr';
 import {
   Camera,
   CameraOff,
@@ -8,23 +8,21 @@ import {
   Zap
 } from 'lucide-react';
 
-export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
+export default function LiveCameraScanner({ onCapture, onCodeDetected, ocrData, busy }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const intervalRef = useRef(null);
   const busyRef = useRef(busy);
   const onCaptureRef = useRef(onCapture);
+  const onCodeDetectedRef = useRef(onCodeDetected);
+  const detectedCodesRef = useRef(new Set());
   const previousSampleRef = useRef(null);
   const acceptedFramesRef = useRef([]);
   const captureInFlightRef = useRef(false);
   const candidateSinceRef = useRef(0);
-  const retryAfterRef = useRef(0);
   const precisionInFlightRef = useRef(false);
   const precisionQueueRef = useRef([]);
-  const continuousRef = useRef(false);
-  const drainPrecisionRef = useRef(null);
-  const startingRef = useRef(false);
   const sessionRef = useRef(0);
 
   const [active, setActive] = useState(false);
@@ -34,7 +32,6 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
 
   const stop = () => {
     sessionRef.current += 1;
-    continuousRef.current = false;
     precisionQueueRef.current = [];
     clearInterval(intervalRef.current);
     intervalRef.current = null;
@@ -54,25 +51,21 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     onCaptureRef.current = onCapture;
   }, [onCapture]);
 
+  useEffect(() => {
+    onCodeDetectedRef.current = onCodeDetected;
+  }, [onCodeDetected]);
+
   const start = async () => {
-    if (startingRef.current || streamRef.current) return;
-    startingRef.current = true;
-    const session = sessionRef.current;
     setError('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 15, max: 24 },
+          width: { ideal: 2560, min: 1280 },
+          height: { ideal: 1440, min: 720 },
         },
         audio: false,
       });
-      if (session !== sessionRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
 
       const track = stream.getVideoTracks()[0];
       const capabilities = track?.getCapabilities?.() || {};
@@ -80,46 +73,30 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
       if (capabilities.focusMode?.includes('continuous')) advanced.focusMode = 'continuous';
       if (capabilities.exposureMode?.includes('continuous')) advanced.exposureMode = 'continuous';
       if (Object.keys(advanced).length) {
-        // Driver-level autofocus is optional and must not hold up video.play.
-        void track.applyConstraints({ advanced: [advanced] }).catch(() => {});
+        await track.applyConstraints({ advanced: [advanced] }).catch(() => {});
       }
 
       streamRef.current = stream;
       previousSampleRef.current = null;
       acceptedFramesRef.current = [];
+      detectedCodesRef.current.clear();
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
-      if (session !== sessionRef.current) return;
       setActive(true);
     } catch {
-      if (session === sessionRef.current) {
-        streamRef.current?.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-        setError('Could not start the camera. Check browser permission and whether another app is using it, then retry.');
-      }
-    } finally {
-      startingRef.current = false;
+      setError('Camera permission was denied or a high-resolution camera is unavailable. You can still upload photographs.');
     }
   };
 
   const capture = async (automatic = false) => {
-    // Read one frame at a time; retain a bounded queue of accepted sides for
-    // precision processing without storing repeated evidence thumbnails.
+    // Live mode samples one temporary frame at a time. It never builds a photo
+    // queue, so repeated copies of the same package are not shown or stored.
     if (!videoRef.current?.videoWidth || busyRef.current || captureInFlightRef.current) return;
-    if (automatic && performance.now() < retryAfterRef.current) return;
     // Backpressure preserves refinement for every accepted side, not an
     // unbounded queue or silently discarded precision work.
-    if (automatic && precisionQueueRef.current.length >= 12) {
-      continuousRef.current = false;
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-      setContinuous(false);
-      setCaptureStatus('Live scanning paused to finish detailed reads of the retained sides.');
-      drainPrecisionRef.current?.();
-      return;
-    }
+    if (automatic && precisionQueueRef.current.length >= 12) return;
     const video = videoRef.current;
     let acceptedCandidate = null;
 
@@ -173,9 +150,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
       // settles, so declarations accumulate without OCR on every video frame.
       const stable = motion <= 12;
       const steadyHandFallback = candidateAge >= 650 && motion <= 20 && detail >= 8;
-      // White labels and black packaging naturally contain clipped pixels.
-      // Only reject near-uniform frames; OCR confidence decides readability.
-      if (detail < 2 || (clippedRatio > .98 && detail < 5.5) || (!stable && !steadyHandFallback)) return;
+      if (detail < 5.5 || clippedRatio > .55 || (!stable && !steadyHandFallback)) return;
       // A matching side is accepted again only if its image detail improved
       // materially; otherwise it would repeat the same expensive OCR request.
       if (closest?.difference < 5 && detail < closest.accepted.detail * 1.18) return;
@@ -204,11 +179,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     captureInFlightRef.current = true;
     const session = sessionRef.current;
     const captureHandler = onCaptureRef.current;
+    const codeHandler = onCodeDetectedRef.current;
     setError('');
     try {
-    const encodingStarted = performance.now();
-    const blob = encodeCameraFrame(canvas);
-    console.debug('[Live OCR] encoding completed', { elapsedMs: Math.round(performance.now() - encodingStarted) });
+    const blob = await withDeadline(() => new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9)), 3000, 'Camera encoding timed out. Try another frame.');
     if (!blob) throw new Error('Could not capture this frame. Try again.');
     if (session !== sessionRef.current) return;
     const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
@@ -217,10 +191,33 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     // Send OCR first. A slow/offline barcode catalogue must never gate text OCR.
     const reading = captureHandler(file, automatic, false);
 
-    // Text-first live scanning: no native barcode detection or catalogue calls.
+    // Chromium exposes its native barcode/QR detector to the browser. It is
+    // independent of OCR and therefore recovers codes even when nearby print
+    // is tiny, stylised, or dot-matrix. Unsupported browsers simply continue
+    // with the normal OCR path.
+    if ('BarcodeDetector' in window && codeHandler) {
+      void withDeadline(async () => {
+      try {
+        const requestedFormats = ['qr_code', 'ean_8', 'ean_13', 'upc_a', 'upc_e', 'code_128', 'itf'];
+        const supportedFormats = window.BarcodeDetector.getSupportedFormats ? await window.BarcodeDetector.getSupportedFormats() : requestedFormats;
+        const formats = requestedFormats.filter((format) => supportedFormats.includes(format));
+        if (!formats.length) throw new Error('No supported barcode formats');
+        const detector = new window.BarcodeDetector({ formats });
+        const codes = await detector.detect(canvas);
+        if (session !== sessionRef.current) return;
+        for (const code of codes) {
+          const rawValue = String(code.rawValue || '').trim();
+          const key = `${code.format}:${rawValue}`;
+          if (rawValue && !detectedCodesRef.current.has(key)) {
+            detectedCodesRef.current.add(key);
+            void Promise.resolve(codeHandler({ value: rawValue, format: code.format })).catch(() => {});
+          }
+        }
+      } catch { /* Barcode detection is an enhancement; OCR remains available. */ }
+      }, 2000, 'Barcode detection timed out').catch(() => {});
+    }
 
         const succeeded = await reading;
-        if (succeeded === false) retryAfterRef.current = performance.now() + 1000;
         if (session !== sessionRef.current) return;
         if (automatic && succeeded !== false && acceptedCandidate) {
           acceptedFramesRef.current = [
@@ -233,13 +230,12 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
         }
         if (automatic && succeeded !== false) {
           precisionQueueRef.current.push({ file, captureHandler, session });
-          setCaptureStatus('Text retained — show another side. Pause Live OCR for detailed precision reads.');
-          const drainPrecision = () => {
-          if (!continuousRef.current && !precisionInFlightRef.current) {
+          setCaptureStatus('Quick read retained — refining small and dotted text…');
+          if (!precisionInFlightRef.current) {
             precisionInFlightRef.current = true;
             void (async () => {
               try {
-                while (precisionQueueRef.current.length && !continuousRef.current) {
+                while (precisionQueueRef.current.length) {
                   const queued = precisionQueueRef.current.shift();
                   if (queued.session !== sessionRef.current) continue;
                   try {
@@ -252,9 +248,6 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
               } finally { precisionInFlightRef.current = false; }
             })();
           }
-          };
-          drainPrecisionRef.current = drainPrecision;
-          drainPrecision();
         } else {
           setCaptureStatus(succeeded === false ? 'No reliable text in that frame — keep scanning.' : 'Live text retained — show another side when ready.');
         }
@@ -270,13 +263,10 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
 
   const toggleContinuous = () => {
     if (continuous) {
-      continuousRef.current = false;
       clearInterval(intervalRef.current);
       intervalRef.current = null;
       setContinuous(false);
-      drainPrecisionRef.current?.();
     } else {
-      continuousRef.current = true;
       setContinuous(true);
       previousSampleRef.current = null;
       candidateSinceRef.current = performance.now();
@@ -289,16 +279,11 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
     ['Product', ['product_name', 'commodity_name']],
     ['Brand', ['brand_name']],
     ['Manufacturer', ['responsible_party_name']],
-    ['Address', ['responsible_party_address']],
     ['Net quantity', ['net_quantity']],
     ['MRP', ['mrp']],
-    ['Unit sale price', ['unit_sale_price']],
     ['Manufacture date', ['manufacture_pack_import_date']],
     ['Best before / use by', ['best_before_or_use_by']],
-    ['Consumer care', ['consumer_care']],
-    ['Consumer phone', ['consumer_phone']],
-    ['Consumer email', ['consumer_email']],
-    ['FSSAI number', ['fssai_license']],
+    ['Consumer care', ['consumer_care', 'consumer_phone', 'consumer_email']],
     ['Country of origin', ['country_of_origin']],
     ['Batch / lot', ['batch_number']],
     ['Barcode / GTIN', ['barcode']],
@@ -472,7 +457,7 @@ export default function LiveCameraScanner({ onCapture, ocrData, busy }) {
                 <p className="text-sm text-white mt-1 break-words">{evidence.value}</p>
               </div>
             ))}
-            {rawLines.length > 0 && <details open={!extractedFields.length} className="rounded-xl border border-slate-800 bg-slate-900/40 p-3"><summary className="cursor-pointer text-[11px] font-bold uppercase tracking-wide text-sky-300">All retained OCR text ({rawLines.length})</summary><div className="mt-2 space-y-1 font-mono text-[11px] text-slate-300">{rawLines.map((line, index) => <p key={`${line.text}-${index}`}><span className="text-slate-600 mr-2">{String(index + 1).padStart(2, '0')}</span>{line.text}<span className="ml-2 text-emerald-500">{Math.round((line.confidence || 0) * 100)}%</span></p>)}</div></details>}
+            {rawLines.length > 0 && <details className="rounded-xl border border-slate-800 bg-slate-900/40 p-3"><summary className="cursor-pointer text-[11px] font-bold uppercase tracking-wide text-sky-300">All retained OCR text ({rawLines.length})</summary><div className="mt-2 space-y-1 font-mono text-[11px] text-slate-300">{rawLines.map((line, index) => <p key={`${line.text}-${index}`}><span className="text-slate-600 mr-2">{String(index + 1).padStart(2, '0')}</span>{line.text}<span className="ml-2 text-emerald-500">{Math.round((line.confidence || 0) * 100)}%</span></p>)}</div></details>}
           </div>
         </div>
 
